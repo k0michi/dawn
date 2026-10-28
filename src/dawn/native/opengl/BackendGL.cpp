@@ -37,6 +37,10 @@
 #include "src/dawn/native/opengl/DisplayEGL.h"
 #include "src/dawn/native/opengl/PhysicalDeviceGL.h"
 
+#if defined(__EMSCRIPTEN__)
+#include "src/dawn/native/opengl/EGLEmscripten.h"
+#endif
+
 namespace dawn::native::opengl {
 
 namespace {
@@ -124,6 +128,17 @@ std::vector<Ref<PhysicalDeviceBase>> Backend::DiscoverPhysicalDevices(
             options.Get<RequestAdapterOptionsAngleVirtualizationGroup>()) {
         angleVirtualizationGroup = angleVirtualizationGroupOptions->angleVirtualizationGroup;
     }
+
+#if defined(__EMSCRIPTEN__)
+    // There is no libEGL to load: EGL is implemented over WebGL 2.
+    if (!options.Get<RequestAdapterOptionsGetGLProc>()) {
+        SwallowDiscoveryError(AppendNewDeviceFrom(
+            DisplayEGL::CreateFromProcAndDisplay(GetType(), EmscriptenEGLGetProcAddress,
+                                                 EGL_NO_DISPLAY),
+            angleVirtualizationGroup));
+        return devices;
+    }
+#endif  // defined(__EMSCRIPTEN__)
 
     if (auto* glGetProcOptions = options.Get<RequestAdapterOptionsGetGLProc>()) {
         SwallowDiscoveryError(AppendNewDeviceFrom(
