@@ -77,6 +77,7 @@ jobs:
           .github/webgl2/link.sh compression-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/compression-test"
           .github/webgl2/link.sh view-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/view-test"
           .github/webgl2/link.sh index-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/index-test"
+          .github/webgl2/link.sh indirect-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/indirect-test"
 
       - name: Install Playwright
         shell: bash
@@ -139,6 +140,11 @@ jobs:
         if: success() || failure()
         shell: bash
         run: node .github/webgl2/run-tests.mjs "$RUNNER_TEMP/index-test"
+
+      - name: Indirect draw tests
+        if: success() || failure()
+        shell: bash
+        run: node .github/webgl2/run-tests.mjs "$RUNNER_TEMP/indirect-test"
 
       - name: Surface tests
         if: success() || failure()

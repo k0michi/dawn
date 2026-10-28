@@ -9,8 +9,8 @@ set -eu
 #
 # The programs are demo (the swift-game textured quad, for smoke-test.mjs),
 # capability-test, buffer-test, async-test, canvas-test, copy-test, msaa-test,
-# compression-test, view-test and index-test (for run-tests.mjs), and
-# surface-test (for surface-test.mjs).
+# compression-test, view-test, index-test and indirect-test (for
+# run-tests.mjs), and surface-test (for surface-test.mjs).
 
 webgl2=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 source=$(CDPATH= cd -- "$webgl2/../.." && pwd)
