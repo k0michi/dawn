@@ -26,10 +26,18 @@ std::string ToString(wgpu::StringView view) {
 
 void Check(const char* name, bool passed, const std::string& why = "") {
     if (passed) {
-        std::printf("PASS %s%s%s\n", name, why.empty() ? "" : ": ", why.c_str());
+        std::printf("PASS %s\n", name);
     } else {
         std::printf("FAIL %s: %s\n", name, why.c_str());
         failures++;
+    }
+}
+
+// Checks that |error| is a validation error, and prints its first line.
+void CheckRejected(const char* name, const std::string& error) {
+    Check(name, !error.empty(), "no validation error");
+    if (!error.empty()) {
+        std::printf("  %s\n", error.substr(0, error.find('\n')).c_str());
     }
 }
 
@@ -103,8 +111,7 @@ void TestStorageBufferBinding() {
         wgpu::BindGroupLayoutDescriptor descriptor{.entryCount = 1, .entries = &entry};
         device.CreateBindGroupLayout(&descriptor);
     });
-    Check("storage buffer binding is rejected", !error.empty(),
-          error.empty() ? "no validation error" : error.substr(0, error.find('\n')));
+    CheckRejected("storage buffer binding is rejected", error);
 }
 
 void TestComputePipeline() {
@@ -117,8 +124,7 @@ void TestComputePipeline() {
         };
         device.CreateComputePipeline(&descriptor);
     });
-    Check("compute pipeline is rejected", !error.empty(),
-          error.empty() ? "no validation error" : error.substr(0, error.find('\n')));
+    CheckRejected("compute pipeline is rejected", error);
 }
 
 void TestIndexBufferUsages() {
@@ -127,8 +133,7 @@ void TestIndexBufferUsages() {
             .usage = wgpu::BufferUsage::Index | wgpu::BufferUsage::Vertex, .size = 16};
         device.CreateBuffer(&descriptor);
     });
-    Check("Index | Vertex buffer is rejected", !error.empty(),
-          error.empty() ? "no validation error" : error.substr(0, error.find('\n')));
+    CheckRejected("Index | Vertex buffer is rejected", error);
 
     error = ValidationErrorOf([] {
         wgpu::BufferDescriptor descriptor{
