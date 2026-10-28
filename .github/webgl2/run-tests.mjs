@@ -2,6 +2,9 @@
 // for it to print "All tests passed" or "<n> test(s) failed".
 //
 // Usage: node .github/webgl2/run-tests.mjs <directory with index.html>
+//
+// HIDE_WEBGL_EXTENSIONS, a comma-separated list of WebGL extensions, runs the
+// test as on a browser without them.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -27,6 +30,23 @@ const browser = await chromium.launch({
   args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
 });
 const page = await browser.newPage();
+// HIDE_WEBGL_EXTENSIONS, a comma-separated list, hides WebGL extensions as on browsers without
+// them: WebGL only enables an extension that getExtension() returns.
+const hidden = (process.env.HIDE_WEBGL_EXTENSIONS ?? '').split(',').filter((name) => name);
+if (hidden.length > 0) {
+  console.log(`Hiding ${hidden.join(', ')}`);
+  await page.addInitScript((hidden) => {
+    const proto = WebGL2RenderingContext.prototype;
+    const getSupportedExtensions = proto.getSupportedExtensions;
+    const getExtension = proto.getExtension;
+    proto.getSupportedExtensions = function () {
+      return getSupportedExtensions.call(this).filter((name) => !hidden.includes(name));
+    };
+    proto.getExtension = function (name) {
+      return hidden.includes(name) ? null : getExtension.call(this, name);
+    };
+  }, hidden);
+}
 let result = '';
 let pageError = '';
 const finished = new Promise((resolve) => {

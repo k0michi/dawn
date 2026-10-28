@@ -75,6 +75,7 @@ jobs:
           .github/webgl2/link.sh copy-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/copy-test"
           .github/webgl2/link.sh msaa-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/msaa-test"
           .github/webgl2/link.sh compression-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/compression-test"
+          .github/webgl2/link.sh view-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/view-test"
 
       - name: Install Playwright
         shell: bash
@@ -120,6 +121,18 @@ jobs:
         if: success() || failure()
         shell: bash
         run: node .github/webgl2/run-tests.mjs "$RUNNER_TEMP/compression-test"
+
+      - name: View tests
+        if: success() || failure()
+        shell: bash
+        run: node .github/webgl2/run-tests.mjs "$RUNNER_TEMP/view-test"
+
+      - name: View tests without WEBGL_stencil_texturing
+        if: success() || failure()
+        shell: bash
+        env:
+          HIDE_WEBGL_EXTENSIONS: WEBGL_stencil_texturing
+        run: node .github/webgl2/run-tests.mjs "$RUNNER_TEMP/view-test"
 
       - name: Surface tests
         if: success() || failure()
