@@ -54,6 +54,14 @@ const std::vector<Case> kCases = {
     {"r16float", wgpu::TextureFormat::R16Float, 2, Halves({0x3c00})},
     {"rg16float", wgpu::TextureFormat::RG16Float, 4, Halves({0xbe00, 0x0001})},
     {"rgba16float", wgpu::TextureFormat::RGBA16Float, 8, Halves({0x7bff, 0x8400, 0x3555, 0x0000})},
+    // -128 isn't used: it reads as -1.0 like -127.
+    {"rgba8snorm", wgpu::TextureFormat::RGBA8Snorm, 4, {0x01, 0x7f, 0x81, 0x00}},
+    {"r8snorm", wgpu::TextureFormat::R8Snorm, 1, {0x01}},
+    // r = 1.328125 (exponent 15, mantissa 0x15), g = a denormal, b = 2.625.
+    {"rg11b10ufloat", wgpu::TextureFormat::RG11B10Ufloat, 4, {0xd5, 0x1b, 0x80, 0x82}},
+    // r = 300, g = 5, b = 511 with exponent 20: the encoding with the smallest exponent.
+    {"rgb9e5ufloat", wgpu::TextureFormat::RGB9E5Ufloat, 4, {0x2c, 0x0b, 0xfc, 0xa7}},
+    {"depth16unorm", wgpu::TextureFormat::Depth16Unorm, 2, {0x34, 0x12}},
 };
 
 constexpr uint32_t kWidth = 5;
@@ -77,7 +85,9 @@ std::string Bytes(const uint8_t* data, size_t size) {
 std::vector<uint8_t> Texel(const Case& c, uint32_t x, uint32_t y, uint32_t layer) {
     std::vector<uint8_t> texel = c.texel;
     // Float texels keep their bytes, since changing them could make NaNs or lose precision.
-    bool isFloat = c.format == wgpu::TextureFormat::R32Float ||
+    bool isFloat = c.format == wgpu::TextureFormat::RG11B10Ufloat ||
+                   c.format == wgpu::TextureFormat::RGB9E5Ufloat ||
+                   c.format == wgpu::TextureFormat::R32Float ||
                    c.format == wgpu::TextureFormat::RG32Float ||
                    c.format == wgpu::TextureFormat::R16Float ||
                    c.format == wgpu::TextureFormat::RG16Float ||
@@ -119,9 +129,11 @@ void TestCopy(const Case& c, uint64_t offset) {
     wgpu::Extent3D wholeSize{kWidth, kHeight, kLayers};
     device.GetQueue().WriteTexture(&whole, data.data(), data.size(), &dataLayout, &wholeSize);
 
-    // Two rows of four texels from (1, 1) of layer 1.
-    constexpr uint32_t kCopyWidth = kWidth - 1;
-    constexpr uint32_t kCopyHeight = kHeight - 1;
+    // Two rows of four texels from (1, 1) of layer 1. Depth copies must cover whole layers.
+    const bool isDepth = c.format == wgpu::TextureFormat::Depth16Unorm;
+    const uint32_t start = isDepth ? 0 : 1;
+    const uint32_t kCopyWidth = kWidth - start;
+    const uint32_t kCopyHeight = kHeight - start;
     uint64_t size = offset + kBytesPerRow * kCopyHeight;
     std::vector<uint8_t> fill(size, kFill);
     wgpu::BufferDescriptor bufferDescriptor{
@@ -130,7 +142,7 @@ void TestCopy(const Case& c, uint64_t offset) {
     fill.resize(bufferDescriptor.size, kFill);
     device.GetQueue().WriteBuffer(buffer, 0, fill.data(), fill.size());
 
-    wgpu::TexelCopyTextureInfo source{.texture = texture, .origin = {1, 1, 1}};
+    wgpu::TexelCopyTextureInfo source{.texture = texture, .origin = {start, start, 1}};
     wgpu::TexelCopyBufferInfo destination{
         .layout = {.offset = offset, .bytesPerRow = kBytesPerRow, .rowsPerImage = kCopyHeight},
         .buffer = buffer};
@@ -149,7 +161,7 @@ void TestCopy(const Case& c, uint64_t offset) {
     std::vector<uint8_t> expected = fill;
     for (uint32_t y = 0; y < kCopyHeight; y++) {
         for (uint32_t x = 0; x < kCopyWidth; x++) {
-            std::vector<uint8_t> texel = Texel(c, 1 + x, 1 + y, 1);
+            std::vector<uint8_t> texel = Texel(c, start + x, start + y, 1);
             std::memcpy(expected.data() + offset + y * kBytesPerRow + x * c.bytesPerTexel,
                         texel.data(), texel.size());
         }
@@ -243,6 +255,65 @@ void TestBGRA8BufferToTexture() {
         });
 }
 
+// Clears each layer of a depth32float texture, which can't be written to, and copies layer 1 to a
+// buffer.
+void TestDepth32Float() {
+    const char* name = "depth32float";
+    wgpu::TextureDescriptor textureDescriptor{
+        .usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc,
+        .size = {kWidth, kHeight, kLayers},
+        .format = wgpu::TextureFormat::Depth32Float,
+    };
+    wgpu::Texture texture = device.CreateTexture(&textureDescriptor);
+    wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+    const float depths[kLayers] = {0.75f, 0.375f};
+    for (uint32_t layer = 0; layer < kLayers; layer++) {
+        wgpu::TextureViewDescriptor viewDescriptor{.dimension = wgpu::TextureViewDimension::e2D,
+                                                   .baseArrayLayer = layer,
+                                                   .arrayLayerCount = 1};
+        wgpu::RenderPassDepthStencilAttachment depth{
+            .view = texture.CreateView(&viewDescriptor),
+            .depthLoadOp = wgpu::LoadOp::Clear,
+            .depthStoreOp = wgpu::StoreOp::Store,
+            .depthClearValue = depths[layer],
+        };
+        wgpu::RenderPassDescriptor passDescriptor{.depthStencilAttachment = &depth};
+        encoder.BeginRenderPass(&passDescriptor).End();
+    }
+    wgpu::BufferDescriptor bufferDescriptor{
+        .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead, .size = kBytesPerRow * kHeight};
+    wgpu::Buffer buffer = device.CreateBuffer(&bufferDescriptor);
+    wgpu::TexelCopyTextureInfo source{.texture = texture, .origin = {0, 0, 1}};
+    wgpu::TexelCopyBufferInfo destination{
+        .layout = {.bytesPerRow = kBytesPerRow, .rowsPerImage = kHeight}, .buffer = buffer};
+    wgpu::Extent3D size{kWidth, kHeight, 1};
+    encoder.CopyTextureToBuffer(&source, &destination, &size);
+    wgpu::CommandBuffer commands = encoder.Finish();
+    device.GetQueue().Submit(1, &commands);
+
+    pending++;
+    buffer.MapAsync(
+        wgpu::MapMode::Read, 0, kBytesPerRow * kHeight, wgpu::CallbackMode::AllowProcessEvents,
+        [name, buffer](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+            pending--;
+            if (status != wgpu::MapAsyncStatus::Success) {
+                Check(name, false, "mapAsync failed: " + ToString(message));
+                return;
+            }
+            const auto* data =
+                static_cast<const uint8_t*>(buffer.GetConstMappedRange(0, kBytesPerRow * kHeight));
+            const float expected = 0.375f;
+            bool same = true;
+            for (uint32_t y = 0; y < kHeight; y++) {
+                for (uint32_t x = 0; x < kWidth; x++) {
+                    same = same && std::memcmp(data + y * kBytesPerRow + x * 4, &expected, 4) == 0;
+                }
+            }
+            Check(name, same, "got " + Bytes(data, 16));
+            buffer.Unmap();
+        });
+}
+
 }  // namespace
 
 int main() {
@@ -252,11 +323,13 @@ int main() {
     for (const Case& c : kCases) {
         TestCopy(c, 0);
         // An offset that is only a multiple of the texel size, where texels straddle words.
-        if (c.bytesPerTexel < 4) {
+        // Depth copies need offsets that are multiples of 4.
+        if (c.bytesPerTexel < 4 && c.format != wgpu::TextureFormat::Depth16Unorm) {
             TestCopy(c, c.bytesPerTexel);
         }
     }
     TestBGRA8BufferToTexture();
+    TestDepth32Float();
     FinishWhen([] { return pending == 0; });
     return 0;
 }
