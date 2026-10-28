@@ -1,0 +1,85 @@
+name: WebGL 2
+
+# Builds dawn::native for Emscripten with the OpenGL ES backend on WebGL 2, and
+# checks that a demo draws in headless Chromium on SwiftShader. The scripts are
+# in .github/webgl2. The other workflows here come from upstream Dawn.
+
+on:
+  push:
+    branches: [webgl2]
+  pull_request:
+    branches: [webgl2]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      EMSDK_VERSION: 6.0.13
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache
+
+      - name: Install Emscripten
+        shell: bash
+        run: |
+          emsdk="$RUNNER_TEMP/emsdk"
+          git clone --depth 1 https://github.com/emscripten-core/emsdk "$emsdk"
+          "$emsdk/emsdk" install "$EMSDK_VERSION"
+          "$emsdk/emsdk" activate "$EMSDK_VERSION"
+          echo "EMSDK=$emsdk" >> "$GITHUB_ENV"
+          echo "$emsdk/upstream/emscripten" >> "$GITHUB_PATH"
+
+      - name: Fetch dependencies
+        shell: bash
+        run: python3 tools/fetch_dawn_dependencies.py --shallow
+
+      - name: Cache compiles
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ env.EMSDK_VERSION }}-${{ github.sha }}
+          restore-keys: ccache-${{ env.EMSDK_VERSION }}-
+
+      - name: Build
+        shell: bash
+        env:
+          EM_COMPILER_WRAPPER: ccache
+        run: |
+          .github/webgl2/build.sh "$RUNNER_TEMP/build"
+          ccache --show-stats
+
+      - name: Link the demo
+        shell: bash
+        run: .github/webgl2/link-demo.sh "$RUNNER_TEMP/build" "$RUNNER_TEMP/demo"
+
+      - name: Install Playwright
+        shell: bash
+        run: |
+          npm ci --prefix .github/webgl2 --no-audit --no-fund
+          npx --prefix .github/webgl2 playwright install --with-deps chromium
+
+      - name: Smoke test
+        shell: bash
+        run: node .github/webgl2/smoke-test.mjs "$RUNNER_TEMP/demo" "$RUNNER_TEMP/demo/screenshot.png"
+
+      - name: Upload the demo
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webgl2-demo
+          path: ${{ runner.temp }}/demo
+          if-no-files-found: ignore

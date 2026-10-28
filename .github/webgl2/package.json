@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "description": "Node.js modules for .github/webgl2/smoke-test.mjs",
+  "type": "module",
+  "devDependencies": {
+    "playwright": "1.64.1"
+  }
+}
