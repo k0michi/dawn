@@ -239,6 +239,12 @@ MaybeError Buffer::MapAtCreationImpl() {
     mMappedDataOffsetInBuffer = 0u;
 
     auto device = ToBackend(GetDevice());
+#if defined(__EMSCRIPTEN__)
+    mWriteBackStaging = true;
+    mCPUStaging.resize(checked_cast<size_t>(GetAllocatedSize()));
+    mMappedData = mCPUStaging;
+    return {};
+#endif
     if (device->IsToggleEnabled(Toggle::GLDefer)) {
         mCPUStaging.resize(checked_cast<size_t>(GetAllocatedSize()));
         mMappedData = mCPUStaging;
@@ -276,6 +282,22 @@ MaybeError Buffer::MapAsyncImpl(wgpu::MapMode mode, size_t offset, size_t size) 
     if (GetDevice()->IsToggleEnabled(Toggle::GLDefer)) {
         TrackUsage();
     }
+
+#if defined(__EMSCRIPTEN__)
+    // Both modes read the range into the staging: Write mappings must start with the buffer's
+    // contents too. getBufferSubData waits for the GPU, as glMapBufferRange does.
+    mWriteBackStaging = (mode & wgpu::MapMode::Write) != wgpu::MapMode::None;
+    mCPUStaging.resize(size);
+    mMappedData = mCPUStaging;
+    return ToBackend(GetDevice())
+        ->EnqueueGL([self = Ref<Buffer>(this), offset, size](const OpenGLFunctions& gl) -> MaybeError {
+            // The mapping may have been unmapped before this runs.
+            if (self->mCPUStaging.size() != size) {
+                return {};
+            }
+            return self->ReadData(gl, offset, size, self->mCPUStaging.data());
+        });
+#endif
 
     return ToBackend(GetDevice())
         ->EnqueueGL([self = Ref<Buffer>(this), offset, size,
@@ -325,6 +347,26 @@ void Buffer::UnmapImpl(BufferState oldState, BufferState newState) {
     if (newState == BufferState::Destroyed) {
         return;
     }
+#if defined(__EMSCRIPTEN__)
+    if (!mWriteBackStaging) {
+        mCPUStaging.clear();
+        return;
+    }
+    mWriteBackStaging = false;
+    IgnoreErrors(
+        device->EnqueueGL([self = Ref<Buffer>(this)](const OpenGLFunctions& gl) -> MaybeError {
+            // COPY_WRITE_BUFFER takes index buffers and other buffers alike.
+            DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER, self->mBuffer));
+            DAWN_GL_TRY(gl, BufferSubData(GL_COPY_WRITE_BUFFER,
+                                          checked_cast<GLintptr>(self->mMappedDataOffsetInBuffer),
+                                          checked_cast<GLsizeiptr>(self->mCPUStaging.size()),
+                                          self->mCPUStaging.data()));
+            DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER, 0));
+            self->mCPUStaging.clear();
+            return {};
+        }));
+    return;
+#endif
     IgnoreErrors(
         device->EnqueueGL([self = Ref<Buffer>(this)](const OpenGLFunctions& gl) -> MaybeError {
             DAWN_GL_TRY(gl, BindBuffer(self->GetDataTarget(), self->mBuffer));

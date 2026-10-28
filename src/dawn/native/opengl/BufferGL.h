@@ -89,6 +89,11 @@ class Buffer final : public BufferBase {
     // Used as staging for mMappedData when running in GLDefer mode. Copied to the actual mapping
     // when executing GL commands.
     std::vector<std::byte> mCPUStaging;
+#if defined(__EMSCRIPTEN__)
+    // WebGL 2 has no glMapBufferRange, and Emscripten's emulation only writes, so every mapping
+    // goes through mCPUStaging. Whether unmapping writes the staging back to the buffer.
+    bool mWriteBackStaging = false;
+#endif
 };
 
 }  // namespace dawn::native::opengl
