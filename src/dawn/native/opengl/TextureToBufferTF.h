@@ -61,13 +61,17 @@ MaybeError UpdateStencilShadow(const OpenGLFunctions& gl,
                                Texture* texture,
                                const SubresourceRange& range);
 
-// The GL objects the copies use, kept for the lifetime of the device's context.
+// The GL objects the copies and other WebGL 2 emulations use, kept for the lifetime of the
+// device's context.
 struct TextureToBufferTFCache {
     absl::flat_hash_map<uint32_t, GLuint> programs;
     GLuint stencilBitsProgram = 0;
     GLuint stencilShadowProgram = 0;
     GLuint sampler = 0;
     GLuint vertexArray = 0;
+    // uint32 indices for uint16 list draws with index 0xFFFF (see DrawIndexed in
+    // CommandBufferGL.cpp). Only ever bound to GL_ELEMENT_ARRAY_BUFFER, as WebGL requires.
+    GLuint wideIndexBuffer = 0;
 };
 
 }  // namespace dawn::native::opengl

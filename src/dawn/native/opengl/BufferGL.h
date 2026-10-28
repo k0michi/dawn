@@ -57,6 +57,14 @@ class Buffer final : public BufferBase {
     // Reads |size| bytes at |offset| into |data| with WebGL 2's getBufferSubData, which waits for
     // the GPU.
     MaybeError ReadData(const OpenGLFunctions& gl, uint64_t offset, uint64_t size, void* data);
+
+    // WebGL 2 always takes the index 0xFFFF as primitive restart, even in list topologies, where
+    // WebGPU takes it as vertex 65535 (see DrawIndexed in CommandBufferGL.cpp). Index buffers
+    // note whether they may hold it: the data written to them from the CPU is checked, and
+    // anything else written to them is assumed to hold it.
+    void NoteWrittenData(uint64_t offset, const void* data, size_t size);
+    void NoteMayContainRestartIndex16() { mMayContainRestartIndex16 = true; }
+    bool MayContainRestartIndex16() const { return mMayContainRestartIndex16; }
 #endif
 
     MaybeError EnsureDataInitialized(bool* outDidDataInitialization = nullptr);
@@ -93,6 +101,8 @@ class Buffer final : public BufferBase {
     // WebGL 2 has no glMapBufferRange, and Emscripten's emulation only writes, so every mapping
     // goes through mCPUStaging. Whether unmapping writes the staging back to the buffer.
     bool mWriteBackStaging = false;
+    // Whether this index buffer may hold 0xFFFF (see NoteWrittenData()).
+    bool mMayContainRestartIndex16 = false;
 #endif
 };
 

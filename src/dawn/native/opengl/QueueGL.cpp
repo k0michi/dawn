@@ -145,6 +145,9 @@ MaybeError Queue::WriteBufferImpl(BufferBase* buffer,
         ->EnqueueGL(data,
                     [buffer = Ref<Buffer>(ToBackend(buffer)), bufferOffset](
                         const OpenGLFunctions& gl, Span<const std::byte> data) -> MaybeError {
+#if defined(__EMSCRIPTEN__)
+                        buffer->NoteWrittenData(bufferOffset, data.data(), data.size());
+#endif
                         DAWN_GL_TRY(gl, BindBuffer(buffer->GetDataTarget(), buffer->GetHandle()));
                         DAWN_GL_TRY(
                             gl, BufferSubData(buffer->GetDataTarget(), checked_cast<GLintptr>(bufferOffset),

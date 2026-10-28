@@ -539,6 +539,7 @@ MaybeError CopyWithTransformFeedback(const OpenGLFunctions& gl,
         DAWN_GL_TRY(gl, BindBuffer(GL_COPY_READ_BUFFER, 0));
         DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER, buffer->GetHandle()));
         DAWN_TRY(ForEachRow([&](uint64_t from, uint64_t to) -> MaybeError {
+            buffer->NoteWrittenData(to, data.data() + from, rowBytes);
             DAWN_GL_TRY(gl, BufferSubData(GL_COPY_WRITE_BUFFER, checked_cast<GLintptr>(to),
                                           checked_cast<GLsizeiptr>(rowBytes), data.data() + from));
             return {};

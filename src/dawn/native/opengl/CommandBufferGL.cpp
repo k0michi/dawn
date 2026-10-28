@@ -921,6 +921,8 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                     std::vector<uint8_t> data(checked_cast<size_t>(copy->size));
                     DAWN_TRY(ToBackend(copy->source)
                                  ->ReadData(gl, copy->sourceOffset, copy->size, data.data()));
+                    ToBackend(copy->destination)
+                        ->NoteWrittenData(copy->destinationOffset, data.data(), data.size());
                     DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER,
                                                ToBackend(copy->destination)->GetHandle()));
                     DAWN_GL_TRY(gl, BufferSubData(GL_COPY_WRITE_BUFFER,
@@ -929,6 +931,9 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                                                   data.data()));
                     DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER, 0));
                 } else {
+                    if (ToBackend(copy->source)->MayContainRestartIndex16()) {
+                        ToBackend(copy->destination)->NoteMayContainRestartIndex16();
+                    }
                     DAWN_GL_TRY(gl, BindBuffer(GL_COPY_READ_BUFFER,
                                                ToBackend(copy->source)->GetHandle()));
                     DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER,
@@ -1027,6 +1032,9 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                     GetSubresourcesAffectedByCopy(src, copy->copySize.ToExtent3D());
                 DAWN_TRY(texture->EnsureSubresourceContentInitialized(gl, subresources));
 #if defined(__EMSCRIPTEN__)
+                if (buffer->GetDataTarget() == GL_ELEMENT_ARRAY_BUFFER) {
+                    buffer->NoteMayContainRestartIndex16();
+                }
                 // WebGL 2 has no compute shaders for the blits that copy what glReadPixels
                 // can't read.
                 if (UsesTransformFeedbackForTextureToBufferCopy(texture, src.aspect)) {
@@ -1559,6 +1567,9 @@ MaybeError CommandBuffer::RecordRenderPass(BeginRenderPassCmd* renderPass,
     RenderPipeline* lastPipeline = nullptr;
     uint64_t indexBufferBaseOffset = 0;
     GLenum indexBufferFormat;
+#if defined(__EMSCRIPTEN__)
+    Buffer* indexBuffer = nullptr;
+#endif
     size_t indexFormatSize = 0;
 
     VertexStateBufferBindingTracker vertexStateBufferBindingTracker;
@@ -1600,6 +1611,36 @@ MaybeError CommandBuffer::RecordRenderPass(BeginRenderPassCmd* renderPass,
                 immediates.SetFirstVertex(draw->baseVertex);
                 immediates.SetFirstInstance(draw->firstInstance);
                 DAWN_TRY(immediates.Apply(gl));
+#if defined(__EMSCRIPTEN__)
+                // WebGL 2 always restarts primitives at the maximum index, even in list
+                // topologies, where WebGPU takes 0xFFFF as vertex 65535 and doesn't restart.
+                // Draw uint16 lists that may hold 0xFFFF with the indices widened to uint32,
+                // where 0xFFFF is an ordinary index.
+                if (topology != GL_LINE_STRIP && topology != GL_TRIANGLE_STRIP &&
+                    indexBufferFormat == GL_UNSIGNED_SHORT &&
+                    indexBuffer->MayContainRestartIndex16() && draw->indexCount > 0) {
+                    std::vector<uint16_t> narrow(draw->indexCount);
+                    DAWN_TRY(indexBuffer->ReadData(
+                        gl, indexBufferBaseOffset + uint64_t(draw->firstIndex) * 2,
+                        uint64_t(draw->indexCount) * 2, narrow.data()));
+                    std::vector<uint32_t> wide(narrow.begin(), narrow.end());
+                    TextureToBufferTFCache& cache =
+                        ToBackend(GetDevice())->GetTextureToBufferTFCache();
+                    if (cache.wideIndexBuffer == 0) {
+                        DAWN_GL_TRY(gl, GenBuffers(1, &cache.wideIndexBuffer));
+                    }
+                    // The element array binding is vertex array state: put it back after.
+                    DAWN_GL_TRY(gl, BindBuffer(GL_ELEMENT_ARRAY_BUFFER, cache.wideIndexBuffer));
+                    DAWN_GL_TRY(gl, BufferData(GL_ELEMENT_ARRAY_BUFFER,
+                                               checked_cast<GLsizeiptr>(wide.size() * 4),
+                                               wide.data(), GL_STREAM_DRAW));
+                    DAWN_GL_TRY(gl, DrawElementsInstanced(topology, draw->indexCount,
+                                                          GL_UNSIGNED_INT, nullptr,
+                                                          draw->instanceCount));
+                    DAWN_GL_TRY(gl, BindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer->GetHandle()));
+                    break;
+                }
+#endif
                 DAWN_GL_TRY(gl, DrawElementsInstanced(
                                     topology, draw->indexCount, indexBufferFormat,
                                     reinterpret_cast<void*>(
@@ -1703,6 +1744,9 @@ MaybeError CommandBuffer::RecordRenderPass(BeginRenderPassCmd* renderPass,
 
                 indexBufferBaseOffset = cmd->offset;
                 indexBufferFormat = IndexFormatType(cmd->format);
+#if defined(__EMSCRIPTEN__)
+                indexBuffer = ToBackend(cmd->buffer.Get());
+#endif
                 indexFormatSize = IndexFormatSize(cmd->format);
                 vertexStateBufferBindingTracker.OnSetIndexBuffer(cmd->buffer.Get());
                 ToBackend(cmd->buffer)->TrackUsage();

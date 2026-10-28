@@ -132,6 +132,20 @@ GLenum Buffer::GetDataTarget() const {
 }
 
 #if defined(__EMSCRIPTEN__)
+void Buffer::NoteWrittenData(uint64_t offset, const void* data, size_t size) {
+    if (GetDataTarget() != GL_ELEMENT_ARRAY_BUFFER || mMayContainRestartIndex16) {
+        return;
+    }
+    // uint16 indices start at even offsets.
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    for (size_t i = offset % 2; i + 1 < size; i += 2) {
+        if (DAWN_UNSAFE_TODO(bytes[i] == 0xff && bytes[i + 1] == 0xff)) {
+            mMayContainRestartIndex16 = true;
+            return;
+        }
+    }
+}
+
 MaybeError Buffer::ReadData(const OpenGLFunctions& gl,
                             uint64_t offset,
                             uint64_t size,
@@ -355,6 +369,8 @@ void Buffer::UnmapImpl(BufferState oldState, BufferState newState) {
     mWriteBackStaging = false;
     IgnoreErrors(
         device->EnqueueGL([self = Ref<Buffer>(this)](const OpenGLFunctions& gl) -> MaybeError {
+            self->NoteWrittenData(self->mMappedDataOffsetInBuffer, self->mCPUStaging.data(),
+                                  self->mCPUStaging.size());
             // COPY_WRITE_BUFFER takes index buffers and other buffers alike.
             DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER, self->mBuffer));
             DAWN_GL_TRY(gl, BufferSubData(GL_COPY_WRITE_BUFFER,
