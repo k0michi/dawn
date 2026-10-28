@@ -549,6 +549,13 @@ bool Device::ShouldApplyIndexBufferOffsetToFirstIndex() const {
     return true;
 }
 
+#if defined(__EMSCRIPTEN__)
+bool Device::NeedsIndirectGPUValidation() const {
+    // WebGL 2 has no compute shaders: indirect draws are read and validated on the CPU.
+    return false;
+}
+#endif
+
 bool Device::CopiesTextureToBufferWithoutBlit(const TextureBase* texture, Aspect aspect) const {
     return UsesTransformFeedbackForTextureToBufferCopy(ToBackend(texture), aspect);
 }

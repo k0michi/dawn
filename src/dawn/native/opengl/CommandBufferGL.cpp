@@ -28,6 +28,7 @@
 #include "src/dawn/native/opengl/CommandBufferGL.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -1576,6 +1577,53 @@ MaybeError CommandBuffer::RecordRenderPass(BeginRenderPassCmd* renderPass,
     BindGroupTracker bindGroupTracker = {};
     ImmediateTracker<RenderImmediatesTracker> immediates = {};
 
+#if defined(__EMSCRIPTEN__)
+    uint64_t indexBufferSize = 0;
+
+    // Draws indexed, for DrawIndexed and the emulated DrawIndexedIndirect. WebGL 2 always restarts
+    // primitives at the maximum index, even in list topologies, where WebGPU takes 0xFFFF as
+    // vertex 65535 and doesn't restart. uint16 lists that may hold 0xFFFF are drawn with the
+    // indices widened to uint32, where 0xFFFF is an ordinary index.
+    auto DrawIndexedWebGL = [&](uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex,
+                                int32_t baseVertex, uint32_t firstInstance) -> MaybeError {
+        DAWN_TRY(vertexStateBufferBindingTracker.Apply(gl, baseVertex, firstInstance));
+        DAWN_TRY(bindGroupTracker.Apply(gl, immediates));
+        immediates.SetFirstVertex(baseVertex);
+        immediates.SetFirstInstance(firstInstance);
+        DAWN_TRY(immediates.Apply(gl));
+
+        const auto topology = lastPipeline->GetGLPrimitiveTopology();
+        if (topology != GL_LINE_STRIP && topology != GL_TRIANGLE_STRIP &&
+            indexBufferFormat == GL_UNSIGNED_SHORT && indexBuffer->MayContainRestartIndex16() &&
+            indexCount > 0) {
+            std::vector<uint16_t> narrow(indexCount);
+            DAWN_TRY(indexBuffer->ReadData(gl, indexBufferBaseOffset + uint64_t(firstIndex) * 2,
+                                           uint64_t(indexCount) * 2, narrow.data()));
+            std::vector<uint32_t> wide(narrow.begin(), narrow.end());
+            TextureToBufferTFCache& cache = ToBackend(GetDevice())->GetTextureToBufferTFCache();
+            if (cache.wideIndexBuffer == 0) {
+                DAWN_GL_TRY(gl, GenBuffers(1, &cache.wideIndexBuffer));
+            }
+            // The element array binding is vertex array state: put it back after.
+            DAWN_GL_TRY(gl, BindBuffer(GL_ELEMENT_ARRAY_BUFFER, cache.wideIndexBuffer));
+            DAWN_GL_TRY(gl, BufferData(GL_ELEMENT_ARRAY_BUFFER,
+                                       checked_cast<GLsizeiptr>(wide.size() * 4), wide.data(),
+                                       GL_STREAM_DRAW));
+            DAWN_GL_TRY(gl, DrawElementsInstanced(topology, indexCount, GL_UNSIGNED_INT, nullptr,
+                                                  instanceCount));
+            DAWN_GL_TRY(gl, BindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer->GetHandle()));
+            return {};
+        }
+        DAWN_GL_TRY(gl, DrawElementsInstanced(
+                            topology, indexCount, indexBufferFormat,
+                            reinterpret_cast<void*>(static_cast<uint64_t>(firstIndex) *
+                                                        indexFormatSize +
+                                                    indexBufferBaseOffset),
+                            instanceCount));
+        return {};
+    };
+#endif
+
     auto DoRenderBundleCommand = [&](CommandIterator* iter, Command type) -> MaybeError {
         switch (type) {
             case Command::Draw: {
@@ -1594,64 +1642,59 @@ MaybeError CommandBuffer::RecordRenderPass(BeginRenderPassCmd* renderPass,
 
             case Command::DrawIndexed: {
                 DrawIndexedCmd* draw = iter->NextCommand<DrawIndexedCmd>();
+#if defined(__EMSCRIPTEN__)
+                DAWN_TRY(DrawIndexedWebGL(draw->indexCount, draw->instanceCount, draw->firstIndex,
+                                          draw->baseVertex, draw->firstInstance));
+#else
                 DAWN_TRY(vertexStateBufferBindingTracker.Apply(gl, draw->baseVertex,
                                                                draw->firstInstance));
                 DAWN_TRY(bindGroupTracker.Apply(gl, immediates));
 
                 const auto topology = lastPipeline->GetGLPrimitiveTopology();
-#if !defined(__EMSCRIPTEN__)
-                // WebGL 2 always restarts at the fixed index and has no enum to change it.
                 if (topology == GL_LINE_STRIP || topology == GL_TRIANGLE_STRIP) {
                     DAWN_GL_TRY(gl, Enable(GL_PRIMITIVE_RESTART_FIXED_INDEX));
                 } else {
                     DAWN_GL_TRY(gl, Disable(GL_PRIMITIVE_RESTART_FIXED_INDEX));
                 }
-#endif
 
                 immediates.SetFirstVertex(draw->baseVertex);
                 immediates.SetFirstInstance(draw->firstInstance);
                 DAWN_TRY(immediates.Apply(gl));
-#if defined(__EMSCRIPTEN__)
-                // WebGL 2 always restarts primitives at the maximum index, even in list
-                // topologies, where WebGPU takes 0xFFFF as vertex 65535 and doesn't restart.
-                // Draw uint16 lists that may hold 0xFFFF with the indices widened to uint32,
-                // where 0xFFFF is an ordinary index.
-                if (topology != GL_LINE_STRIP && topology != GL_TRIANGLE_STRIP &&
-                    indexBufferFormat == GL_UNSIGNED_SHORT &&
-                    indexBuffer->MayContainRestartIndex16() && draw->indexCount > 0) {
-                    std::vector<uint16_t> narrow(draw->indexCount);
-                    DAWN_TRY(indexBuffer->ReadData(
-                        gl, indexBufferBaseOffset + uint64_t(draw->firstIndex) * 2,
-                        uint64_t(draw->indexCount) * 2, narrow.data()));
-                    std::vector<uint32_t> wide(narrow.begin(), narrow.end());
-                    TextureToBufferTFCache& cache =
-                        ToBackend(GetDevice())->GetTextureToBufferTFCache();
-                    if (cache.wideIndexBuffer == 0) {
-                        DAWN_GL_TRY(gl, GenBuffers(1, &cache.wideIndexBuffer));
-                    }
-                    // The element array binding is vertex array state: put it back after.
-                    DAWN_GL_TRY(gl, BindBuffer(GL_ELEMENT_ARRAY_BUFFER, cache.wideIndexBuffer));
-                    DAWN_GL_TRY(gl, BufferData(GL_ELEMENT_ARRAY_BUFFER,
-                                               checked_cast<GLsizeiptr>(wide.size() * 4),
-                                               wide.data(), GL_STREAM_DRAW));
-                    DAWN_GL_TRY(gl, DrawElementsInstanced(topology, draw->indexCount,
-                                                          GL_UNSIGNED_INT, nullptr,
-                                                          draw->instanceCount));
-                    DAWN_GL_TRY(gl, BindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer->GetHandle()));
-                    break;
-                }
-#endif
                 DAWN_GL_TRY(gl, DrawElementsInstanced(
                                     topology, draw->indexCount, indexBufferFormat,
                                     reinterpret_cast<void*>(
                                         static_cast<uint64_t>(draw->firstIndex) * indexFormatSize +
                                         indexBufferBaseOffset),
                                     draw->instanceCount));
+#endif
                 break;
             }
 
             case Command::DrawIndirect: {
                 DrawIndirectCmd* draw = iter->NextCommand<DrawIndirectCmd>();
+#if defined(__EMSCRIPTEN__)
+                // WebGL 2 has no indirect draws, nor compute shaders to validate them: read the
+                // arguments and draw directly. WebGPU skips draws with a first instance unless
+                // indirect-first-instance is enabled.
+                Buffer* indirectBuffer = ToBackend(draw->indirectBuffer.Get());
+                std::array<uint32_t, 4> args;
+                DAWN_TRY(indirectBuffer->ReadData(gl, draw->indirectOffset, sizeof(args),
+                                                  args.data()));
+                indirectBuffer->TrackUsage();
+                const auto [vertexCount, instanceCount, firstVertex, firstInstance] = args;
+                if (firstInstance != 0 &&
+                    !GetDevice()->HasFeature(Feature::IndirectFirstInstance)) {
+                    break;
+                }
+                DAWN_TRY(vertexStateBufferBindingTracker.Apply(gl, 0, firstInstance));
+                DAWN_TRY(bindGroupTracker.Apply(gl, immediates));
+                immediates.SetFirstVertex(0);
+                immediates.SetFirstInstance(firstInstance);
+                DAWN_TRY(immediates.Apply(gl));
+                DAWN_GL_TRY(gl, DrawArraysInstanced(lastPipeline->GetGLPrimitiveTopology(),
+                                                    firstVertex, vertexCount, instanceCount));
+                break;
+#else
                 DAWN_TRY(bindGroupTracker.Apply(gl, immediates));
 
                 immediates.SetFirstInstance(0);
@@ -1671,10 +1714,31 @@ MaybeError CommandBuffer::RecordRenderPass(BeginRenderPassCmd* renderPass,
                                                        validatedDraw.indirectOffset))));
                 indirectBuffer->TrackUsage();
                 break;
+#endif
             }
 
             case Command::DrawIndexedIndirect: {
                 DrawIndexedIndirectCmd* draw = iter->NextCommand<DrawIndexedIndirectCmd>();
+#if defined(__EMSCRIPTEN__)
+                // As for DrawIndirect. WebGPU also skips draws past the end of the index buffer.
+                Buffer* indirectBuffer = ToBackend(draw->indirectBuffer.Get());
+                std::array<uint32_t, 5> args;
+                DAWN_TRY(indirectBuffer->ReadData(gl, draw->indirectOffset, sizeof(args),
+                                                  args.data()));
+                indirectBuffer->TrackUsage();
+                const auto [indexCount, instanceCount, firstIndex, baseVertex, firstInstance] =
+                    args;
+                if (firstInstance != 0 &&
+                    !GetDevice()->HasFeature(Feature::IndirectFirstInstance)) {
+                    break;
+                }
+                if ((uint64_t(firstIndex) + indexCount) * indexFormatSize > indexBufferSize) {
+                    break;
+                }
+                DAWN_TRY(DrawIndexedWebGL(indexCount, instanceCount, firstIndex,
+                                          static_cast<int32_t>(baseVertex), firstInstance));
+                break;
+#else
 
                 DAWN_TRY(bindGroupTracker.Apply(gl, immediates));
 
@@ -1705,6 +1769,7 @@ MaybeError CommandBuffer::RecordRenderPass(BeginRenderPassCmd* renderPass,
                                                          validatedDraw.indirectOffset))));
                 indirectBuffer->TrackUsage();
                 break;
+#endif
             }
 
             case Command::InsertDebugMarker:
@@ -1746,6 +1811,7 @@ MaybeError CommandBuffer::RecordRenderPass(BeginRenderPassCmd* renderPass,
                 indexBufferFormat = IndexFormatType(cmd->format);
 #if defined(__EMSCRIPTEN__)
                 indexBuffer = ToBackend(cmd->buffer.Get());
+                indexBufferSize = cmd->size;
 #endif
                 indexFormatSize = IndexFormatSize(cmd->format);
                 vertexStateBufferBindingTracker.OnSetIndexBuffer(cmd->buffer.Get());

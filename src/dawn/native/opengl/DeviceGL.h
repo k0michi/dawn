@@ -242,6 +242,9 @@ class Device final : public DeviceBase {
     bool ShouldApplyIndexBufferOffsetToFirstIndex() const override;
     bool CopiesTextureToBufferWithoutBlit(const TextureBase* texture,
                                           Aspect aspect) const override;
+#if defined(__EMSCRIPTEN__)
+    bool NeedsIndirectGPUValidation() const override;
+#endif
 
     const AHBFunctions* GetOrLoadAHBFunctions();
 
