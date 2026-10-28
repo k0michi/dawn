@@ -65,6 +65,7 @@ class SwapChainEGL final : public SwapChainBase {
                                         EGLint surfaceHeight);
 #if defined(__EMSCRIPTEN__)
     void ScheduleRelease();
+    static MaybeError ClearCanvas(const OpenGLFunctions& gl);
 #endif
 
     EGLSurface mEGLSurface = EGL_NO_SURFACE;
@@ -73,6 +74,12 @@ class SwapChainEGL final : public SwapChainBase {
 #if defined(__EMSCRIPTEN__)
     // Whether the canvas shows the current texture as last submitted.
     bool mOnCanvas = false;
+    // Whether the canvas was cleared or drawn to since the current texture was acquired.
+    bool mCanvasDrawn = false;
+    // Whether the release timer is releasing the texture, rather than the program presenting it.
+    bool mReleasing = false;
+    // Whether the program doesn't present, so the next texture starts by clearing the canvas.
+    bool mClearOnAcquire = true;
 #endif
 
     MaybeError PresentImpl() override;

@@ -226,7 +226,14 @@ MaybeError Queue::WriteTextureImpl(const TexelCopyTextureInfo& destination,
             if (ensureInitialized) {
                 DAWN_TRY(dest->EnsureSubresourceContentInitialized(gl, range));
             }
-            return DoTexSubImage(gl, textureCopy, data.data(), dataLayout, writeSizePixel);
+            DAWN_TRY(DoTexSubImage(gl, textureCopy, data.data(), dataLayout, writeSizePixel));
+#if defined(__EMSCRIPTEN__)
+            // As with submits, show what was written to a surface texture.
+            if (SwapChainEGL* swapChain = dest->GetSwapChain()) {
+                DAWN_TRY(swapChain->BlitToCanvas(gl));
+            }
+#endif
+            return {};
         });
 }
 

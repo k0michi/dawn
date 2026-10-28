@@ -27,6 +27,7 @@
 
 #include "src/dawn/native/opengl/SwapChainEGL.h"
 
+#include <array>
 #include <memory>
 #include <utility>
 
@@ -108,7 +109,10 @@ MaybeError SwapChainEGL::PresentImpl() {
     const EGLFunctions& egl = device->GetEGL(false);
 
 #if defined(__EMSCRIPTEN__)
-    bool needsBlit = !mOnCanvas;
+    // A program that presents gets the texture on the canvas here, even with nothing submitted
+    // to it: WebGL zero-initializes textures, so the canvas shows transparent black then, as a
+    // WebGPU canvas would.
+    bool needsBlit = !mOnCanvas && !mReleasing;
 #else
     bool needsBlit = true;
 #endif
@@ -127,6 +131,7 @@ MaybeError SwapChainEGL::PresentImpl() {
 
 #if defined(__EMSCRIPTEN__)
     mTexture->SetSwapChain(nullptr);
+    mClearOnAcquire = mReleasing;
 #endif
     mTexture->APIDestroy();
     mTexture = nullptr;
@@ -144,13 +149,16 @@ MaybeError SwapChainEGL::BlitToDefaultFramebuffer(const OpenGLFunctions& gl,
     DAWN_TRY(mTextureView->BindToFramebuffer(gl, GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0));
     DAWN_TRY(CheckFramebufferComplete(gl, GL_READ_FRAMEBUFFER));
 
+#if defined(__EMSCRIPTEN__)
+    // Chrome only counts a draw or a clear as drawing to the canvas, not a blit: without a
+    // clear, the blit is lost when Chrome clears the presented drawing buffer.
+    if (!mCanvasDrawn) {
+        DAWN_TRY(ClearCanvas(gl));
+        mCanvasDrawn = true;
+    }
+#endif
     DAWN_GL_TRY(gl, BindFramebuffer(GL_DRAW_FRAMEBUFFER, 0));
     DAWN_GL_TRY(gl, Scissor(0, 0, surfaceWidth, surfaceHeight));
-#if defined(__EMSCRIPTEN__)
-    // Chrome only counts a draw or a clear as drawing to the canvas, not a blit: without the
-    // clear, the blit is lost when Chrome clears the presented drawing buffer.
-    DAWN_GL_TRY(gl, Clear(GL_COLOR_BUFFER_BIT));
-#endif
     DAWN_GL_TRY(gl, BlitFramebuffer(0, 0, mTexture->GetWidth(Aspect::Color),
                                     mTexture->GetHeight(Aspect::Color), 0, surfaceHeight,
                                     surfaceWidth, 0, GL_COLOR_BUFFER_BIT, GL_LINEAR));
@@ -172,6 +180,15 @@ ResultOrError<SwapChainTextureInfo> SwapChainEGL::GetCurrentTextureImpl() {
 #if defined(__EMSCRIPTEN__)
     mTexture->SetSwapChain(this);
     mOnCanvas = false;
+    mCanvasDrawn = false;
+    if (mClearOnAcquire) {
+        // A WebGPU canvas shows transparent black at the end of a task that got the texture but
+        // submitted nothing to it. Programs that don't present get that from this clear, which
+        // a submit's blit then covers. Programs that present get it from the present; clearing
+        // here could erase what they presented earlier in the task.
+        DAWN_TRY(ToBackend(GetDevice())->EnqueueGL(ClearCanvas));
+        mCanvasDrawn = true;
+    }
     ScheduleRelease();
 #endif
 
@@ -204,21 +221,36 @@ MaybeError SwapChainEGL::BlitToCanvas(const OpenGLFunctions& gl) {
 void SwapChainEGL::ScheduleRelease() {
     // Programs written for Emdawnwebgpu never call wgpuSurfacePresent, and get a new texture
     // in each browser frame. Submits already copy the texture to the canvas, so release it in
-    // a task after the one that got it, unless the program has presented by then.
-    auto* swapChain = new Ref<SwapChainEGL>(this);
+    // a task after the one that got it, unless the program has presented it by then.
+    struct Release {
+        Ref<SwapChainEGL> swapChain;
+        Ref<Texture> texture;
+    };
     emscripten_set_timeout(
         [](void* data) {
-            std::unique_ptr<Ref<SwapChainEGL>> swapChain(static_cast<Ref<SwapChainEGL>*>(data));
-            // The texture is gone once presented, or when the swap chain is detached.
-            if ((*swapChain)->mTexture == nullptr) {
+            std::unique_ptr<Release> release(static_cast<Release*>(data));
+            SwapChainEGL* swapChain = release->swapChain.Get();
+            // The texture is gone once presented, or when the swap chain is detached, and the
+            // swap chain may have a newer one by now.
+            if (swapChain->mTexture != release->texture) {
                 return;
             }
-            // Don't copy the texture to the canvas again: the browser has shown the canvas and
-            // may have cleared it, and a texture nothing was submitted to has no frame to show.
-            (*swapChain)->mOnCanvas = true;
-            (*swapChain)->GetSurface()->APIPresent();
+            swapChain->mReleasing = true;
+            swapChain->GetSurface()->APIPresent();
+            swapChain->mReleasing = false;
         },
-        0, swapChain);
+        0, new Release{this, mTexture});
+}
+
+MaybeError SwapChainEGL::ClearCanvas(const OpenGLFunctions& gl) {
+    // Clears the default framebuffer with the state that Dawn sets again before it draws.
+    static constexpr std::array<GLfloat, 4> kTransparentBlack = {0, 0, 0, 0};
+    DAWN_GL_TRY(gl, BindFramebuffer(GL_DRAW_FRAMEBUFFER, 0));
+    DAWN_GL_TRY(gl, Disable(GL_SCISSOR_TEST));
+    DAWN_GL_TRY(gl, ColorMask(true, true, true, true));
+    DAWN_GL_TRY(gl, ClearBufferfv(GL_COLOR, 0, kTransparentBlack.data()));
+    DAWN_GL_TRY(gl, Enable(GL_SCISSOR_TEST));
+    return {};
 }
 #endif  // defined(__EMSCRIPTEN__)
 
