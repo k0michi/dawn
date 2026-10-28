@@ -2,6 +2,9 @@
 // on WebGL 2, which Dawn copies with a compute shader elsewhere: each test
 // writes known bytes to a texture, copies part of it to a buffer and checks
 // the copied bytes and that the bytes around them kept their values.
+//
+// Also checks texture-to-texture copies, which WebGL 2 does with
+// blitFramebuffer, or through a buffer for formats it can't render to.
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -378,6 +381,173 @@ void TestStencil(const char* name, wgpu::TextureFormat format) {
         });
 }
 
+// Copies the region from (1, 1) of layer 1 of a written |c| texture to layer 0 of another,
+// whole layers for depth and stencil, and reads the copy back.
+void TestTextureToTexture(const Case& c, wgpu::TextureAspect aspect = wgpu::TextureAspect::All) {
+    std::string name = std::string(c.name) + " to a texture";
+    const bool isDepthStencil = c.format == wgpu::TextureFormat::Depth16Unorm ||
+                                c.format == wgpu::TextureFormat::Stencil8;
+    wgpu::TextureDescriptor descriptor{
+        .usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc,
+        .size = {kWidth, kHeight, kLayers},
+        .format = c.format,
+    };
+    wgpu::Texture source = device.CreateTexture(&descriptor);
+    wgpu::Texture destination = device.CreateTexture(&descriptor);
+    std::vector<uint8_t> data;
+    for (uint32_t layer = 0; layer < kLayers; layer++) {
+        for (uint32_t y = 0; y < kHeight; y++) {
+            for (uint32_t x = 0; x < kWidth; x++) {
+                std::vector<uint8_t> texel = Texel(c, x, y, layer);
+                data.insert(data.end(), texel.begin(), texel.end());
+            }
+        }
+    }
+    wgpu::TexelCopyTextureInfo whole{.texture = source, .aspect = aspect};
+    wgpu::TexelCopyBufferLayout dataLayout{.bytesPerRow = kWidth * c.bytesPerTexel,
+                                           .rowsPerImage = kHeight};
+    wgpu::Extent3D wholeSize{kWidth, kHeight, kLayers};
+    device.GetQueue().WriteTexture(&whole, data.data(), data.size(), &dataLayout, &wholeSize);
+
+    const uint32_t start = isDepthStencil ? 0 : 1;
+    const uint32_t width = kWidth - start;
+    const uint32_t height = kHeight - start;
+    wgpu::TexelCopyTextureInfo from{.texture = source, .origin = {start, start, 1}};
+    wgpu::TexelCopyTextureInfo to{.texture = destination};
+    wgpu::TexelCopyTextureInfo readFrom{.texture = destination, .aspect = aspect};
+    wgpu::BufferDescriptor bufferDescriptor{
+        .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead,
+        .size = kBytesPerRow * height};
+    wgpu::Buffer buffer = device.CreateBuffer(&bufferDescriptor);
+    wgpu::TexelCopyBufferInfo readTo{
+        .layout = {.bytesPerRow = kBytesPerRow, .rowsPerImage = height}, .buffer = buffer};
+    wgpu::Extent3D size{width, height, 1};
+    std::string error = ValidationErrorOf([&] {
+        wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+        encoder.CopyTextureToTexture(&from, &to, &size);
+        encoder.CopyTextureToBuffer(&readFrom, &readTo, &size);
+        wgpu::CommandBuffer commands = encoder.Finish();
+        device.GetQueue().Submit(1, &commands);
+    });
+    if (!error.empty()) {
+        Check(name.c_str(), false, "copying: " + error.substr(0, error.find('\n')));
+        return;
+    }
+
+    std::vector<uint8_t> expected(width * height * c.bytesPerTexel);
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x++) {
+            std::vector<uint8_t> texel = Texel(c, start + x, start + y, 1);
+            std::memcpy(expected.data() + (y * width + x) * c.bytesPerTexel, texel.data(),
+                        texel.size());
+        }
+    }
+    const uint32_t rowBytes = width * c.bytesPerTexel;
+    pending++;
+    buffer.MapAsync(
+        wgpu::MapMode::Read, 0, kBytesPerRow * height, wgpu::CallbackMode::AllowProcessEvents,
+        [name, buffer, expected, rowBytes, height](wgpu::MapAsyncStatus status,
+                                                   wgpu::StringView message) {
+            pending--;
+            if (status != wgpu::MapAsyncStatus::Success) {
+                Check(name.c_str(), false, "mapAsync failed: " + ToString(message));
+                return;
+            }
+            const auto* data = static_cast<const uint8_t*>(
+                buffer.GetConstMappedRange(0, kBytesPerRow * height));
+            std::string why;
+            for (uint32_t y = 0; y < height && why.empty(); y++) {
+                const uint8_t* row = data + y * kBytesPerRow;
+                const uint8_t* want = expected.data() + y * rowBytes;
+                if (std::memcmp(row, want, rowBytes) != 0) {
+                    why = "row " + std::to_string(y) + ": got " + Bytes(row, rowBytes) +
+                          " expected " + Bytes(want, rowBytes);
+                }
+            }
+            Check(name.c_str(), why.empty(), why);
+            buffer.Unmap();
+        });
+}
+
+// Copies 4x4 RGBA8-sized texels between textures of other shapes or formats and reads the copy
+// back from |readLevel| and |readZ| of the destination.
+void TestTextureToTextureBetween(const char* name,
+                                 wgpu::TextureDescriptor sourceDescriptor,
+                                 wgpu::TexelCopyTextureInfo from,
+                                 wgpu::TextureDescriptor destinationDescriptor,
+                                 wgpu::TexelCopyTextureInfo to) {
+    constexpr uint32_t kSide = 4;
+    std::vector<uint8_t> texels(kSide * kSide * 4);
+    for (size_t i = 0; i < texels.size(); i++) {
+        texels[i] = uint8_t(i * 13 + 7);
+    }
+    sourceDescriptor.usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc;
+    destinationDescriptor.usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc;
+    from.texture = device.CreateTexture(&sourceDescriptor);
+    to.texture = device.CreateTexture(&destinationDescriptor);
+    wgpu::TexelCopyBufferLayout dataLayout{.bytesPerRow = kSide * 4, .rowsPerImage = kSide};
+    wgpu::Extent3D size{kSide, kSide, 1};
+    device.GetQueue().WriteTexture(&from, texels.data(), texels.size(), &dataLayout, &size);
+
+    wgpu::BufferDescriptor bufferDescriptor{
+        .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead,
+        .size = kBytesPerRow * kSide};
+    wgpu::Buffer buffer = device.CreateBuffer(&bufferDescriptor);
+    wgpu::TexelCopyBufferInfo readTo{
+        .layout = {.bytesPerRow = kBytesPerRow, .rowsPerImage = kSide}, .buffer = buffer};
+    std::string error = ValidationErrorOf([&] {
+        wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+        encoder.CopyTextureToTexture(&from, &to, &size);
+        encoder.CopyTextureToBuffer(&to, &readTo, &size);
+        wgpu::CommandBuffer commands = encoder.Finish();
+        device.GetQueue().Submit(1, &commands);
+    });
+    if (!error.empty()) {
+        Check(name, false, "copying: " + error.substr(0, error.find('\n')));
+        return;
+    }
+    pending++;
+    buffer.MapAsync(
+        wgpu::MapMode::Read, 0, kBytesPerRow * kSide, wgpu::CallbackMode::AllowProcessEvents,
+        [name, buffer, texels](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+            pending--;
+            if (status != wgpu::MapAsyncStatus::Success) {
+                Check(name, false, "mapAsync failed: " + ToString(message));
+                return;
+            }
+            const auto* data =
+                static_cast<const uint8_t*>(buffer.GetConstMappedRange(0, kBytesPerRow * kSide));
+            bool same = true;
+            for (uint32_t y = 0; y < kSide; y++) {
+                same = same && std::memcmp(data + y * kBytesPerRow, texels.data() + y * kSide * 4,
+                                           kSide * 4) == 0;
+            }
+            Check(name, same, "got " + Bytes(data, kSide * 4) + " expected " +
+                                  Bytes(texels.data(), kSide * 4));
+            buffer.Unmap();
+        });
+}
+
+void TestTextureToTextureShapes() {
+    auto Descriptor = [](wgpu::TextureFormat format, wgpu::Extent3D size, uint32_t mips = 1,
+                         wgpu::TextureDimension dimension = wgpu::TextureDimension::e2D) {
+        return wgpu::TextureDescriptor{
+            .dimension = dimension, .size = size, .format = format, .mipLevelCount = mips};
+    };
+    const auto kRGBA8 = wgpu::TextureFormat::RGBA8Unorm;
+    const auto kSRGB = wgpu::TextureFormat::RGBA8UnormSrgb;
+    TestTextureToTextureBetween("rgba8unorm to rgba8unorm-srgb", Descriptor(kRGBA8, {4, 4}), {},
+                                Descriptor(kSRGB, {4, 4}), {});
+    TestTextureToTextureBetween("rgba8unorm-srgb to rgba8unorm", Descriptor(kSRGB, {4, 4}), {},
+                                Descriptor(kRGBA8, {4, 4}), {});
+    TestTextureToTextureBetween("mip level 1 to mip level 2", Descriptor(kRGBA8, {8, 8}, 2),
+                                {.mipLevel = 1}, Descriptor(kRGBA8, {16, 16}, 3),
+                                {.mipLevel = 2});
+    TestTextureToTextureBetween(
+        "2D array layer to 3D slice", Descriptor(kRGBA8, {4, 4, 2}), {.origin = {0, 0, 1}},
+        Descriptor(kRGBA8, {4, 4, 3}, 1, wgpu::TextureDimension::e3D), {.origin = {0, 0, 2}});
+}
+
 }  // namespace
 
 int main() {
@@ -396,6 +566,14 @@ int main() {
     TestDepth32Float();
     TestStencil("stencil8", wgpu::TextureFormat::Stencil8);
     TestStencil("depth24plus-stencil8 stencil", wgpu::TextureFormat::Depth24PlusStencil8);
+    for (const Case& c : kCases) {
+        TestTextureToTexture(c);
+    }
+    TestTextureToTexture({"rgba32float", wgpu::TextureFormat::RGBA32Float, 16,
+                          Floats({1.5f, -2.0f, 0.25f, 8.0f})});
+    TestTextureToTexture({"stencil8", wgpu::TextureFormat::Stencil8, 1, {0x5a}},
+                         wgpu::TextureAspect::StencilOnly);
+    TestTextureToTextureShapes();
     FinishWhen([] { return pending == 0; });
     return 0;
 }
