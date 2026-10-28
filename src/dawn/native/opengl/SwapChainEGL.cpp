@@ -225,6 +225,15 @@ MaybeError SwapChainEGL::CreateEGLSurface(const DisplayEGL* display) {
                                                       attribs.data());
                 return {};
 #endif  // defined(DAWN_USE_X11)
+#if defined(__EMSCRIPTEN__)
+            case Surface::Type::EmscriptenCanvas:
+                // EGLEmscripten.cpp takes the CSS selector as the native window.
+                mEGLSurface = egl.CreateWindowSurface(
+                    eglDisplay, config,
+                    reinterpret_cast<EGLNativeWindowType>(surface->GetCanvasSelector().c_str()),
+                    attribs.data());
+                return {};
+#endif  // defined(__EMSCRIPTEN__)
 
             // TODO(344814083): Add support for creating surfaces using EGL_KHR_platform_base and
             // friends.

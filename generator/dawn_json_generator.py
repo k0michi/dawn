@@ -958,8 +958,9 @@ class MultiGeneratorFromDawnJSON(Generator):
         renders = []
         imported_templates = []
 
-        params_dawn = parse_json(loaded_json,
-                                 enabled_tags=['dawn', 'native', 'deprecated'])
+        params_dawn = parse_json(
+            loaded_json,
+            enabled_tags=['dawn', 'emscripten_native', 'native', 'deprecated'])
 
         params_all = parse_json(
             loaded_json,
@@ -1177,7 +1178,7 @@ class MultiGeneratorFromDawnJSON(Generator):
         if 'native_utils' in targets:
             params_dawn_native = parse_json(
                 loaded_json,
-                enabled_tags=['dawn', 'native', 'deprecated'],
+                enabled_tags=['dawn', 'emscripten_native', 'native', 'deprecated'],
                 addins=native_addins)
             frontend_params = [
                 RENDER_PARAMS_BASE,

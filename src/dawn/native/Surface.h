@@ -85,6 +85,7 @@ class Surface final : public ErrorMonad {
         WindowsUWPSwapChainPanel,
         WindowsWinUISwapChainPanel,
         XlibWindow,
+        EmscriptenCanvas,
     };
     Type GetType() const;
     InstanceBase* GetInstance() const;
@@ -116,6 +117,9 @@ class Surface final : public ErrorMonad {
     // Valid to call if the type is WindowsXlib
     void* GetXDisplay() const;
     uint64_t GetXWindow() const;
+
+    // Valid to call if the type is EmscriptenCanvas
+    const std::string& GetCanvasSelector() const;
 
     const std::string& GetLabel() const;
 
@@ -189,6 +193,9 @@ class Surface final : public ErrorMonad {
     // Xlib
     raw_ptr<void> mXDisplay = nullptr;
     uint64_t mXWindow = 0;
+
+    // EmscriptenCanvas
+    std::string mCanvasSelector;
 };
 
 // Not defined in webgpu_absl_format.h/cpp because you can't forward-declare a nested type.

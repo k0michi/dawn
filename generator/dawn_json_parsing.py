@@ -105,6 +105,9 @@ def _validate_and_get_tags(json_data):
     allowed_tags = {
         'dawn',
         'emscripten',
+        # Emscripten items that dawn::native also implements when built for
+        # Emscripten, with the same values as Emdawnwebgpu.
+        'emscripten_native',
         'native',
         'deprecated',
         'art',
@@ -425,8 +428,8 @@ class Record:
 class StructureType(Record, Type):
 
     def __init__(self, is_enabled, name, json_data):
-        tags = _validate_and_get_tags(json_data)
-        if tags == ['emscripten']:
+        tags = _validate_and_get_tags(json_data) or []
+        if 'emscripten' in tags and 'dawn' not in tags:
             if name != 'INTERNAL_HAVE_EMDAWNWEBGPU_HEADER':
                 assert name.startswith('emscripten'), name
         else:

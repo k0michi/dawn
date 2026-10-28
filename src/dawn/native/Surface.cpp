@@ -85,6 +85,9 @@ absl::FormatConvertResult<absl::FormatConversionCharSet::kString> AbslFormatConv
         case Surface::Type::XlibWindow:
             s->Append("XlibWindow");
             break;
+        case Surface::Type::EmscriptenCanvas:
+            s->Append("EmscriptenCanvas");
+            break;
         case Surface::Type::Undefined:
             DAWN_UNREACHABLE();
             break;
@@ -116,7 +119,8 @@ ResultOrValError<UnpackedPtr<SurfaceDescriptor>> ValidateSurfaceDescriptor(
                   Branch<SurfaceSourceWindowsHWND>, Branch<SurfaceDescriptorFromWindowsCoreWindow>,
                   Branch<SurfaceDescriptorFromWindowsUWPSwapChainPanel>,
                   Branch<SurfaceDescriptorFromWindowsWinUISwapChainPanel>,
-                  Branch<SurfaceSourceXlibWindow>, Branch<SurfaceSourceWaylandSurface>>()));
+                  Branch<SurfaceSourceXlibWindow>, Branch<SurfaceSourceWaylandSurface>,
+                  Branch<EmscriptenSurfaceSourceCanvasHTMLSelector>>()));
     switch (type) {
 #if DAWN_PLATFORM_IS(ANDROID)
         case wgpu::SType::SurfaceSourceAndroidNativeWindow: {
@@ -211,6 +215,15 @@ ResultOrValError<UnpackedPtr<SurfaceDescriptor>> ValidateSurfaceDescriptor(
             return descriptor;
         }
 #endif  // defined(DAWN_USE_X11)
+#if defined(__EMSCRIPTEN__)
+        case wgpu::SType::EmscriptenSurfaceSourceCanvasHTMLSelector: {
+            auto* subDesc = descriptor.Get<EmscriptenSurfaceSourceCanvasHTMLSelector>();
+            DAWN_ASSERT(subDesc != nullptr);
+            DAWN_INVALID_IF(std::string_view(subDesc->selector).empty(),
+                            "Canvas selector is empty.");
+            return descriptor;
+        }
+#endif  // defined(__EMSCRIPTEN__)
         default:
             return DAWN_VALIDATION_ERROR("Unsupported sType (%s)", type);
     }
@@ -306,7 +319,8 @@ Surface::Surface(InstanceBase* instance, const UnpackedPtr<SurfaceDescriptor>& d
                 Branch<SurfaceSourceWindowsHWND>, Branch<SurfaceDescriptorFromWindowsCoreWindow>,
                 Branch<SurfaceDescriptorFromWindowsUWPSwapChainPanel>,
                 Branch<SurfaceDescriptorFromWindowsWinUISwapChainPanel>,
-                Branch<SurfaceSourceXlibWindow>, Branch<SurfaceSourceWaylandSurface>>()
+                Branch<SurfaceSourceXlibWindow>, Branch<SurfaceSourceWaylandSurface>,
+                Branch<EmscriptenSurfaceSourceCanvasHTMLSelector>>()
             .AcquireSuccess();
     switch (type) {
         case wgpu::SType::SurfaceSourceAndroidNativeWindow: {
@@ -360,6 +374,12 @@ Surface::Surface(InstanceBase* instance, const UnpackedPtr<SurfaceDescriptor>& d
             mType = Type::XlibWindow;
             mXDisplay = subDesc->display;
             mXWindow = subDesc->window;
+            break;
+        }
+        case wgpu::SType::EmscriptenSurfaceSourceCanvasHTMLSelector: {
+            auto* subDesc = descriptor.Get<EmscriptenSurfaceSourceCanvasHTMLSelector>();
+            mType = Type::EmscriptenCanvas;
+            mCanvasSelector = std::string(subDesc->selector);
             break;
         }
         default:
@@ -463,6 +483,12 @@ uint64_t Surface::GetXWindow() const {
     DAWN_CHECK(!IsError());
     DAWN_CHECK(mType == Type::XlibWindow);
     return mXWindow;
+}
+
+const std::string& Surface::GetCanvasSelector() const {
+    DAWN_CHECK(!IsError());
+    DAWN_CHECK(mType == Type::EmscriptenCanvas);
+    return mCanvasSelector;
 }
 
 MaybeUnknownError Surface::Configure(const SurfaceConfiguration* configIn) {

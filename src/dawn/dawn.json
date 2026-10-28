@@ -3992,7 +3992,7 @@
         "category": "structure",
         "chained": "in",
         "chain roots": ["surface descriptor"],
-        "tags": ["emscripten"],
+        "tags": ["emscripten", "emscripten_native"],
         "members": [
             {"name": "selector", "type": "string view"}
         ]
@@ -4128,7 +4128,7 @@
             {"value": 15, "name": "compatibility mode limits"},
             {"value": 16, "name": "texture binding view dimension"},
 
-            {"value": 0, "name": "emscripten surface source canvas HTML selector", "tags": ["emscripten"]},
+            {"value": 0, "name": "emscripten surface source canvas HTML selector", "tags": ["emscripten", "emscripten_native"]},
 
             {"value": 0, "name": "surface descriptor from windows core window", "tags": ["dawn"]},
             {"value": 3, "name": "surface descriptor from windows UWP swap chain panel", "tags": ["dawn"]},
