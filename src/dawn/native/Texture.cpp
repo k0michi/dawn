@@ -914,6 +914,22 @@ MaybeValError ValidateTextureDescriptor(
     }
     DAWN_TRY(ValidateSampleCount(*descriptor, usage, format));
 
+#if defined(__EMSCRIPTEN__)
+    // WebGL 2 has multisampled renderbuffers but no multisampled textures: shaders can't read
+    // multisampled data and blits can't write it, so the OpenGL ES backend can only render to
+    // multisampled textures and resolve them.
+    if (descriptor->sampleCount > 1 &&
+        device->GetAdapter()->GetPhysicalDevice()->GetBackendType() ==
+            wgpu::BackendType::OpenGLES) {
+        constexpr wgpu::TextureUsage kAttachmentUsages =
+            wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TransientAttachment;
+        DAWN_INVALID_IF(usage & ~kAttachmentUsages,
+                        "The usage (%s) of a multisampled texture includes %s, which WebGL 2 does "
+                        "not allow.",
+                        usage, usage & ~kAttachmentUsages);
+    }
+#endif
+
     DAWN_INVALID_IF(descriptor->size.width == 0 || descriptor->size.height == 0 ||
                         descriptor->size.depthOrArrayLayers == 0 || descriptor->mipLevelCount == 0,
                     "The texture size (%s) or mipLevelCount (%u) is empty.", descriptor->size,

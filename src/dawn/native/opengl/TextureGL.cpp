@@ -353,6 +353,12 @@ Texture::Texture(Device* device,
 Texture::~Texture() {}
 
 bool Texture::IsRenderbuffer() const {
+#if defined(__EMSCRIPTEN__)
+    // WebGL 2 has multisampled renderbuffers but no multisampled textures.
+    if (GetSampleCount() > 1) {
+        return true;
+    }
+#endif
     return ((GetUsage() & wgpu::TextureUsage::TransientAttachment) != 0) &&
            GetFormat().HasDepthOrStencil();
 }
