@@ -47,6 +47,10 @@ class Buffer final : public BufferBase {
                                              const UnpackedPtr<BufferDescriptor>& descriptor);
 
     GLuint GetHandle() const;
+    // The target to bind the buffer to when reading or writing its data. WebGL 2 does not let
+    // a buffer used for indices be bound to other targets, so index buffers use
+    // GL_ELEMENT_ARRAY_BUFFER, and other buffers GL_ARRAY_BUFFER.
+    GLenum GetDataTarget() const;
 
     MaybeError EnsureDataInitialized(bool* outDidDataInitialization = nullptr);
     MaybeError EnsureDataInitializedAsDestination(uint64_t offset,

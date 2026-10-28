@@ -1152,9 +1152,9 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
 
                 if (!clearedToZero) {
                     const std::vector<uint8_t> clearValues(checked_cast<size_t>(cmd->size), 0u);
-                    DAWN_GL_TRY(gl, BindBuffer(GL_ARRAY_BUFFER, dstBuffer->GetHandle()));
+                    DAWN_GL_TRY(gl, BindBuffer(dstBuffer->GetDataTarget(), dstBuffer->GetHandle()));
                     DAWN_GL_TRY(
-                        gl, BufferSubData(GL_ARRAY_BUFFER, checked_cast<GLintptr>(cmd->offset),
+                        gl, BufferSubData(dstBuffer->GetDataTarget(), checked_cast<GLintptr>(cmd->offset),
                                           checked_cast<GLsizeiptr>(cmd->size), clearValues.data()));
                 }
 
@@ -1185,8 +1185,8 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                     values[i] = value;
                 }
 
-                DAWN_GL_TRY(gl, BindBuffer(GL_ARRAY_BUFFER, destination->GetHandle()));
-                DAWN_GL_TRY(gl, BufferSubData(GL_ARRAY_BUFFER,
+                DAWN_GL_TRY(gl, BindBuffer(destination->GetDataTarget(), destination->GetHandle()));
+                DAWN_GL_TRY(gl, BufferSubData(destination->GetDataTarget(),
                                               checked_cast<GLintptr>(cmd->destinationOffset),
                                               checked_cast<GLsizeiptr>(size), values.data()));
 
@@ -1218,8 +1218,8 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                 Buffer* dstBuffer = ToBackend(write->buffer.Get());
                 DAWN_TRY(dstBuffer->EnsureDataInitializedAsDestination(offset, data.size()));
 
-                DAWN_GL_TRY(gl, BindBuffer(GL_ARRAY_BUFFER, dstBuffer->GetHandle()));
-                DAWN_GL_TRY(gl, BufferSubData(GL_ARRAY_BUFFER, checked_cast<GLintptr>(offset),
+                DAWN_GL_TRY(gl, BindBuffer(dstBuffer->GetDataTarget(), dstBuffer->GetHandle()));
+                DAWN_GL_TRY(gl, BufferSubData(dstBuffer->GetDataTarget(), checked_cast<GLintptr>(offset),
                                               checked_cast<GLsizeiptr>(data.size()), data.data()));
 
                 dstBuffer->TrackUsage();
