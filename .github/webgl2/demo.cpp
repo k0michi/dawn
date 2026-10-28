@@ -1,5 +1,9 @@
 // The swift-game demo (a checkered, textured quad on a cornflower blue clear)
 // in C++, drawn by dawn::native's OpenGL ES backend on a WebGL 2 canvas.
+//
+// With ?present=no in the page's URL, it never calls Present, like programs
+// written for Emdawnwebgpu.
+#include <emscripten/emscripten.h>
 #include <emscripten/html5.h>
 #include <webgpu/webgpu_cpp.h>
 
@@ -49,6 +53,7 @@ struct Demo {
     wgpu::Buffer vertexBuffer;
     wgpu::Buffer indexBuffer;
     int frames = 0;
+    bool present = true;
 };
 
 Demo demo;
@@ -79,10 +84,12 @@ bool Frame(double, void*) {
     pass.End();
     wgpu::CommandBuffer commands = encoder.Finish();
     demo.queue.Submit(1, &commands);
-    demo.surface.Present();
+    if (demo.present) {
+        demo.surface.Present();
+    }
     demo.instance.ProcessEvents();
     if (++demo.frames == 1) {
-        std::printf("first frame presented\n");
+        std::printf("first frame drawn\n");
     }
     return true;
 }
@@ -90,6 +97,8 @@ bool Frame(double, void*) {
 }  // namespace
 
 int main() {
+    demo.present = !emscripten_run_script_int(
+        "new URLSearchParams(location.search).get('present') === 'no'");
     demo.instance = wgpu::CreateInstance();
 
     // The OpenGL ES backend only offers compatibility-mode adapters.
