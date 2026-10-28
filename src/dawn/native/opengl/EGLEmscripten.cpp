@@ -35,8 +35,9 @@
 //   a window surface is that canvas's default framebuffer. The browser shows
 //   the framebuffer when control returns to it, so eglSwapBuffers does nothing.
 // - EGL_KHR_fence_sync is WebGL 2 fences. WebGL only updates a fence between
-//   tasks, so a wait with a timeout calls glFinish() and reports the fence as
-//   signaled instead of blocking.
+//   tasks, even after glFinish(), so a fence created before a glFinish() is
+//   reported as signaled, and a wait with a timeout calls glFinish() instead of
+//   blocking. glFinish() is wrapped to count the calls.
 
 #include "src/dawn/native/opengl/EGLEmscripten.h"
 
@@ -44,8 +45,10 @@
 #include <emscripten/html5.h>
 #include <emscripten/html5_webgl.h>
 
+#include <cstdint>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 
 // GL entry points from Emscripten's WebGL library. They are declared here
 // instead of including GLES3/gl3.h, which would clash with Dawn's GL headers.
@@ -85,6 +88,26 @@ EGLenum gAPI = EGL_OPENGL_ES_API;
 EGLContext gCurrentContext = EGL_NO_CONTEXT;
 EGLSurface gCurrentDraw = EGL_NO_SURFACE;
 EGLSurface gCurrentRead = EGL_NO_SURFACE;
+
+// How many times glFinish() has been called, and the count when each fence was created.
+uint64_t gFinishCount = 0;
+std::unordered_map<void*, uint64_t> gFinishCountAtFence;
+
+void Finish() {
+    glFinish();
+    gFinishCount++;
+}
+
+// glFinish() for the backend, which completes every fence created before it.
+void EGLAPIENTRY FinishGL() {
+    Finish();
+}
+
+// Whether glFinish() has been called since |sync| was created.
+bool FinishedSince(void* sync) {
+    auto fence = gFinishCountAtFence.find(sync);
+    return fence != gFinishCountAtFence.end() && fence->second < gFinishCount;
+}
 
 EGLBoolean Fail(EGLint error) {
     gError = error;
@@ -514,6 +537,7 @@ EGLSyncKHR EGLAPIENTRY CreateSyncKHR(EGLDisplay display, EGLenum type, const EGL
         Fail(EGL_BAD_ALLOC);
         return EGL_NO_SYNC_KHR;
     }
+    gFinishCountAtFence[sync] = gFinishCount;
     Succeed();
     return static_cast<EGLSyncKHR>(sync);
 }
@@ -522,6 +546,7 @@ EGLBoolean EGLAPIENTRY DestroySyncKHR(EGLDisplay display, EGLSyncKHR sync) {
     if (display != kDisplay) {
         return Fail(EGL_BAD_DISPLAY);
     }
+    gFinishCountAtFence.erase(sync);
     glDeleteSync(sync);
     return Succeed();
 }
@@ -542,13 +567,17 @@ EGLint EGLAPIENTRY ClientWaitSyncKHR(EGLDisplay display,
             Succeed();
             return EGL_CONDITION_SATISFIED_KHR;
         case kGLTimeoutExpired:
+            if (FinishedSince(sync)) {
+                Succeed();
+                return EGL_CONDITION_SATISFIED_KHR;
+            }
             if (timeout == 0) {
                 Succeed();
                 return EGL_TIMEOUT_EXPIRED_KHR;
             }
             // The fence cannot signal before this task ends. glFinish() completes
             // everything before it, which is what the caller waits for.
-            glFinish();
+            Finish();
             Succeed();
             return EGL_CONDITION_SATISFIED_KHR;
         default:
@@ -574,8 +603,9 @@ EGLBoolean EGLAPIENTRY GetSyncAttribKHR(EGLDisplay display,
         case EGL_SYNC_STATUS_KHR: {
             int status = 0;
             glGetSynciv(sync, kGLSyncStatus, 1, nullptr, &status);
-            *value = static_cast<unsigned int>(status) == kGLSignaled ? EGL_SIGNALED_KHR
-                                                                      : EGL_UNSIGNALED_KHR;
+            *value = static_cast<unsigned int>(status) == kGLSignaled || FinishedSince(sync)
+                         ? EGL_SIGNALED_KHR
+                         : EGL_UNSIGNALED_KHR;
             return Succeed();
         }
         default:
@@ -642,6 +672,9 @@ __eglMustCastToProperFunctionPointerType EGLAPIENTRY EmscriptenEGLGetProcAddress
             }
         }
         return nullptr;
+    }
+    if (std::strcmp(name, "glFinish") == 0) {
+        return reinterpret_cast<__eglMustCastToProperFunctionPointerType>(FinishGL);
     }
     // GL functions, which needs -sGL_ENABLE_GET_PROC_ADDRESS when linking.
     return reinterpret_cast<__eglMustCastToProperFunctionPointerType>(
