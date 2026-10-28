@@ -219,6 +219,10 @@ void PhysicalDevice::InitializeSupportedFeaturesImpl() {
             (mFunctions.IsGLExtensionSupported("GL_EXT_texture_compression_dxt1") &&
              mFunctions.IsGLExtensionSupported("GL_ANGLE_texture_compression_dxt3") &&
              mFunctions.IsGLExtensionSupported("GL_ANGLE_texture_compression_dxt5"));
+#if defined(__EMSCRIPTEN__)
+        // WebGL names S3TC and its sRGB formats differently; RGTC and BPTC keep the EXT names.
+        supportsS3TC |= mFunctions.IsGLExtensionSupported("GL_WEBGL_compressed_texture_s3tc");
+#endif
 
         // COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT, COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT and
         // COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT requires both GL_EXT_texture_sRGB and
@@ -235,6 +239,10 @@ void PhysicalDevice::InitializeSupportedFeaturesImpl() {
         bool supportsS3TCSRGB =
             mFunctions.IsGLExtensionSupported("GL_EXT_texture_compression_s3tc_srgb") ||
             mFunctions.IsGLExtensionSupported("GL_NV_sRGB_formats");
+#if defined(__EMSCRIPTEN__)
+        supportsS3TCSRGB |=
+            mFunctions.IsGLExtensionSupported("GL_WEBGL_compressed_texture_s3tc_srgb");
+#endif
 
         // BC4 and BC5
         bool supportsRGTC = mFunctions.IsAtLeastGL(3, 0) ||
@@ -252,7 +260,12 @@ void PhysicalDevice::InitializeSupportedFeaturesImpl() {
         }
     }
 
-    if (mFunctions.IsGLExtensionSupported("GL_KHR_texture_compression_astc_ldr")) {
+    bool supportsASTC = mFunctions.IsGLExtensionSupported("GL_KHR_texture_compression_astc_ldr");
+#if defined(__EMSCRIPTEN__)
+    // WEBGL_compressed_texture_astc always has the LDR profile.
+    supportsASTC |= mFunctions.IsGLExtensionSupported("GL_WEBGL_compressed_texture_astc");
+#endif
+    if (supportsASTC) {
         EnableFeature(Feature::TextureCompressionASTC);
 
         // GL_KHR_texture_compression_astc_sliced_3d is an extension in OpenGL ES 3.1.
