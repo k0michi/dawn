@@ -548,6 +548,78 @@ void TestTextureToTextureShapes() {
         Descriptor(kRGBA8, {4, 4, 3}, 1, wgpu::TextureDimension::e3D), {.origin = {0, 0, 2}});
 }
 
+// Copies a texture to an index buffer, which WebGL 2 can't bind for glReadPixels or transform
+// feedback, at an offset between padded rows, and reads the index buffer back through a copy.
+void TestCopyToIndexBuffer(const char* name, wgpu::TextureFormat format, uint32_t bytesPerTexel) {
+    constexpr uint32_t kSide = 4;
+    wgpu::TextureDescriptor textureDescriptor{
+        .usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc,
+        .size = {kSide, kSide},
+        .format = format,
+    };
+    wgpu::Texture texture = device.CreateTexture(&textureDescriptor);
+    std::vector<uint8_t> texels(kSide * kSide * bytesPerTexel);
+    for (size_t i = 0; i < texels.size(); i++) {
+        texels[i] = uint8_t(i * 7 + 1);
+    }
+    wgpu::TexelCopyTextureInfo whole{.texture = texture};
+    wgpu::TexelCopyBufferLayout dataLayout{.bytesPerRow = kSide * bytesPerTexel,
+                                           .rowsPerImage = kSide};
+    wgpu::Extent3D size{kSide, kSide};
+    device.GetQueue().WriteTexture(&whole, texels.data(), texels.size(), &dataLayout, &size);
+
+    constexpr uint64_t kOffset = 256;
+    const uint64_t bufferSize = kOffset + kBytesPerRow * kSide;
+    std::vector<uint8_t> fill(bufferSize, kFill);
+    wgpu::BufferDescriptor indexDescriptor{
+        .usage = wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::CopySrc,
+        .size = bufferSize};
+    wgpu::Buffer index = device.CreateBuffer(&indexDescriptor);
+    device.GetQueue().WriteBuffer(index, 0, fill.data(), fill.size());
+    wgpu::BufferDescriptor readbackDescriptor{
+        .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead, .size = bufferSize};
+    wgpu::Buffer readback = device.CreateBuffer(&readbackDescriptor);
+
+    wgpu::TexelCopyBufferInfo destination{
+        .layout = {.offset = kOffset, .bytesPerRow = kBytesPerRow, .rowsPerImage = kSide},
+        .buffer = index};
+    std::string error = ValidationErrorOf([&] {
+        wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+        encoder.CopyTextureToBuffer(&whole, &destination, &size);
+        encoder.CopyBufferToBuffer(index, 0, readback, 0, bufferSize);
+        wgpu::CommandBuffer commands = encoder.Finish();
+        device.GetQueue().Submit(1, &commands);
+    });
+    if (!error.empty()) {
+        Check(name, false, "copying: " + error.substr(0, error.find('\n')));
+        return;
+    }
+    std::vector<uint8_t> expected = fill;
+    for (uint32_t y = 0; y < kSide; y++) {
+        std::memcpy(expected.data() + kOffset + y * kBytesPerRow,
+                    texels.data() + y * kSide * bytesPerTexel, kSide * bytesPerTexel);
+    }
+    pending++;
+    readback.MapAsync(
+        wgpu::MapMode::Read, 0, bufferSize, wgpu::CallbackMode::AllowProcessEvents,
+        [name, readback, expected](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+            pending--;
+            if (status != wgpu::MapAsyncStatus::Success) {
+                Check(name, false, "mapAsync failed: " + ToString(message));
+                return;
+            }
+            const auto* data =
+                static_cast<const uint8_t*>(readback.GetConstMappedRange(0, expected.size()));
+            size_t first = 0;
+            while (first < expected.size() && data[first] == expected[first]) {
+                first++;
+            }
+            Check(name, first == expected.size(),
+                  "byte " + std::to_string(first) + " differs");
+            readback.Unmap();
+        });
+}
+
 }  // namespace
 
 int main() {
@@ -574,6 +646,9 @@ int main() {
     TestTextureToTexture({"stencil8", wgpu::TextureFormat::Stencil8, 1, {0x5a}},
                          wgpu::TextureAspect::StencilOnly);
     TestTextureToTextureShapes();
+    // Through glReadPixels, and through transform feedback.
+    TestCopyToIndexBuffer("rgba8unorm to an index buffer", wgpu::TextureFormat::RGBA8Unorm, 4);
+    TestCopyToIndexBuffer("r8unorm to an index buffer", wgpu::TextureFormat::R8Unorm, 1);
     FinishWhen([] { return pending == 0; });
     return 0;
 }
