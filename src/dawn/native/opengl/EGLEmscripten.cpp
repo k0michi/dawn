@@ -90,6 +90,9 @@ struct WindowSurface {
 // is its index here plus one.
 std::vector<std::string> gDisplays;
 
+// Whether contexts have WEBGL_stencil_texturing, which Emscripten doesn't enable by itself.
+bool gStencilTexturing = false;
+
 EGLint gError = EGL_SUCCESS;
 EGLenum gAPI = EGL_OPENGL_ES_API;
 EGLDisplay gCurrentDisplay = EGL_NO_DISPLAY;
@@ -234,6 +237,8 @@ EGLContext EGLAPIENTRY CreateContext(EGLDisplay display,
         Fail(EGL_BAD_ALLOC);
         return EGL_NO_CONTEXT;
     }
+    // GL_DEPTH_STENCIL_TEXTURE_MODE, for sampling the stencil of depth-stencil textures.
+    gStencilTexturing = emscripten_webgl_enable_extension(context, "WEBGL_stencil_texturing");
     Succeed();
     return reinterpret_cast<EGLContext>(context);
 }
@@ -701,6 +706,10 @@ const Proc kProcs[] = {
 
 EGLDisplay EmscriptenEGLGetCanvasDisplay(const char* canvas) {
     return GetDisplay(reinterpret_cast<EGLNativeDisplayType>(const_cast<char*>(canvas)));
+}
+
+bool EmscriptenEGLHasStencilTexturing() {
+    return gStencilTexturing;
 }
 
 bool EmscriptenEGLDisplayIsCanvas(EGLDisplay display, const char* canvas) {

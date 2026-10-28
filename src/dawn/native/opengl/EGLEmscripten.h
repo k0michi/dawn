@@ -38,6 +38,9 @@ __eglMustCastToProperFunctionPointerType EGLAPIENTRY EmscriptenEGLGetProcAddress
 // The display of the canvas named by the CSS selector |canvas|.
 EGLDisplay EmscriptenEGLGetCanvasDisplay(const char* canvas);
 
+// Whether contexts can set GL_DEPTH_STENCIL_TEXTURE_MODE (WEBGL_stencil_texturing).
+bool EmscriptenEGLHasStencilTexturing();
+
 // Whether |display| is the canvas named by the CSS selector |canvas|.
 bool EmscriptenEGLDisplayIsCanvas(EGLDisplay display, const char* canvas);
 

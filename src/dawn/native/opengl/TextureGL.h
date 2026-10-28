@@ -74,6 +74,10 @@ class Texture final : public TextureBase {
     // The swap chain whose current texture this is, if any.
     SwapChainEGL* GetSwapChain() const;
     void SetSwapChain(SwapChainEGL* swapChain);
+
+    // An R8UI copy of the stencil values, sampled in their place without WEBGL_stencil_texturing.
+    GLuint GetStencilShadow() const;
+    void SetStencilShadow(GLuint shadow);
 #endif
 
   private:
@@ -89,6 +93,7 @@ class Texture final : public TextureBase {
     OwnsHandle mOwnsHandle = OwnsHandle::No;
 #if defined(__EMSCRIPTEN__)
     raw_ptr<SwapChainEGL> mSwapChain = nullptr;
+    GLuint mStencilShadow = 0;
 #endif
     GLenum mTarget;
 };

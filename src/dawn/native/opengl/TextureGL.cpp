@@ -371,10 +371,29 @@ SwapChainEGL* Texture::GetSwapChain() const {
 void Texture::SetSwapChain(SwapChainEGL* swapChain) {
     mSwapChain = swapChain;
 }
+
+GLuint Texture::GetStencilShadow() const {
+    return mStencilShadow;
+}
+
+void Texture::SetStencilShadow(GLuint shadow) {
+    mStencilShadow = shadow;
+}
 #endif
 
 void Texture::DestroyImpl(DestroyReason reason) {
     TextureBase::DestroyImpl(reason);
+#if defined(__EMSCRIPTEN__)
+    if (mStencilShadow != 0) {
+        IgnoreErrors(ToBackend(GetDevice())
+                         ->EnqueueDestroyGL(
+                             this, &Texture::GetStencilShadow, reason,
+                             [](const OpenGLFunctions& gl, GLuint handle) -> MaybeError {
+                                 DAWN_GL_TRY_IGNORE_ERRORS(gl, DeleteTextures(1, &handle));
+                                 return {};
+                             }));
+    }
+#endif
     if (mOwnsHandle == OwnsHandle::Yes) {
         if (IsRenderbuffer()) {
             IgnoreErrors(ToBackend(GetDevice())

@@ -56,6 +56,9 @@
 #include "src/dawn/native/opengl/SamplerGL.h"
 #include "src/dawn/native/opengl/TextureGL.h"
 #include "src/dawn/native/opengl/TextureToBufferTF.h"
+#if defined(__EMSCRIPTEN__)
+#include "src/dawn/native/opengl/EGLEmscripten.h"
+#endif
 #include "src/dawn/native/opengl/UtilsGL.h"
 #include "src/utils/compiler.h"
 #include "src/utils/numeric.h"
@@ -435,13 +438,30 @@ class BindGroupTracker : public BindGroupTrackerBase<false> {
                     TextureView* view = ToBackend(group->GetBindingAsTextureView(bindingIndex));
                     GLuint handle = view->GetTextureHandle();
                     GLenum target = view->GetGLTarget();
+#if defined(__EMSCRIPTEN__)
+                    // Without WEBGL_stencil_texturing, sample the stencil shadow, R8UI copies
+                    // of the stencil values made before the render pass, and leave the
+                    // depth-stencil texture mode alone: WebGL 2 samples depth by default.
+                    const bool stencilTexturing = EmscriptenEGLHasStencilTexturing();
+                    const bool isDepthStencil =
+                        ToBackend(view->GetTexture())->GetGLFormat().format == GL_DEPTH_STENCIL;
+                    if (isDepthStencil && !stencilTexturing &&
+                        view->GetAspects() == Aspect::Stencil) {
+                        handle = ToBackend(view->GetTexture())->GetStencilShadow();
+                        DAWN_ASSERT(handle != 0);
+                    }
+#endif
                     FlatBindingIndex viewIndex = indices[bindingIndex];
 
                     for (auto unit : mPipelineGL->GetTextureUnitsForTextureView(viewIndex)) {
                         DAWN_GL_TRY(gl, ActiveTexture(GL_TEXTURE0 + GLuint(unit)));
                         DAWN_GL_TRY(gl, BindTexture(target, handle));
+#if defined(__EMSCRIPTEN__)
+                        if (isDepthStencil && stencilTexturing) {
+#else
                         if (ToBackend(view->GetTexture())->GetGLFormat().format ==
                             GL_DEPTH_STENCIL) {
+#endif
                             Aspect aspect = view->GetAspects();
                             DAWN_ASSERT(HasOneBit(aspect));
                             switch (aspect) {
@@ -778,6 +798,35 @@ class ImmediateTracker : public T {
     }
 };
 
+#if defined(__EMSCRIPTEN__)
+// Updates the stencil shadows of the textures whose stencil |scope| samples, for WebGL 2 without
+// WEBGL_stencil_texturing (see UpdateStencilShadow()).
+MaybeError UpdateStencilShadows(const OpenGLFunctions& gl,
+                                Device* device,
+                                const SyncScopeResourceUsage& scope) {
+    if (EmscriptenEGLHasStencilTexturing()) {
+        return {};
+    }
+    for (size_t i = 0; i < scope.textures.size(); i++) {
+        Texture* texture = ToBackend(scope.textures[i]);
+        if (texture->GetGLFormat().format != GL_DEPTH_STENCIL) {
+            continue;
+        }
+        DAWN_TRY(scope.textureSyncInfos[i].Iterate(
+            [&](const SubresourceRange& range, const TextureSyncInfo& info) -> MaybeError {
+                if ((info.usage & wgpu::TextureUsage::TextureBinding) &&
+                    (range.aspects & Aspect::Stencil)) {
+                    SubresourceRange stencil = range;
+                    stencil.aspects = Aspect::Stencil;
+                    DAWN_TRY(UpdateStencilShadow(gl, device, texture, stencil));
+                }
+                return {};
+            }));
+    }
+    return {};
+}
+#endif  // defined(__EMSCRIPTEN__)
+
 }  // namespace
 
 CommandBuffer::CommandBuffer(CommandEncoder* encoder, const CommandBufferDescriptor* descriptor)
@@ -836,6 +885,11 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                 }
                 DAWN_TRY(
                     LazyClearSyncScope(GetResourceUsages().renderPasses[nextRenderPassNumber]));
+#if defined(__EMSCRIPTEN__)
+                DAWN_TRY(UpdateStencilShadows(
+                    gl, ToBackend(GetDevice()),
+                    GetResourceUsages().renderPasses[nextRenderPassNumber]));
+#endif
                 DAWN_TRY(LazyClearRenderPassAttachments(
                     GetDevice(), cmd, [&](TextureBase* texture, const SubresourceRange& range) {
                         return ToBackend(texture)->EnsureSubresourceContentInitialized(gl, range);

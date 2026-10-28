@@ -53,10 +53,19 @@ MaybeError CopyTextureToBufferWithTransformFeedback(const OpenGLFunctions& gl,
                                                     const BufferCopy& destination,
                                                     const Extent3D& copySize);
 
+// WebGL 2 without WEBGL_stencil_texturing can't sample stencil values. Before a render pass samples
+// the stencil of |texture|, writes its stencil values in |range| to the texture's stencil shadow,
+// an R8UI texture of the same shape, which bindings then use in its place.
+MaybeError UpdateStencilShadow(const OpenGLFunctions& gl,
+                               Device* device,
+                               Texture* texture,
+                               const SubresourceRange& range);
+
 // The GL objects the copies use, kept for the lifetime of the device's context.
 struct TextureToBufferTFCache {
     absl::flat_hash_map<uint32_t, GLuint> programs;
     GLuint stencilBitsProgram = 0;
+    GLuint stencilShadowProgram = 0;
     GLuint sampler = 0;
     GLuint vertexArray = 0;
 };
