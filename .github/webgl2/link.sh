@@ -7,8 +7,8 @@ set -eu
 #
 # Usage: .github/webgl2/link.sh <program> <build directory> <output directory>
 #
-# The programs are demo (the swift-game textured quad, for smoke-test.mjs) and
-# capability-test (for run-tests.mjs).
+# The programs are demo (the swift-game textured quad, for smoke-test.mjs), and
+# capability-test and buffer-test (for run-tests.mjs).
 
 webgl2=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 source=$(CDPATH= cd -- "$webgl2/../.." && pwd)
