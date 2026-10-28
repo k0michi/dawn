@@ -29,11 +29,13 @@
 // parts that the OpenGL ES backend uses. It is handed to DisplayEGL as the
 // eglGetProcAddress, so the backend runs unchanged on top of it.
 //
-// - One display. Contexts need no config (EGL_KHR_no_config_context) and no
-//   surface (EGL_KHR_surfaceless_context).
-// - A context is a WebGL 2 context on the canvas named by kCanvasSelector, and
-//   a window surface is that canvas's default framebuffer. The browser shows
-//   the framebuffer when control returns to it, so eglSwapBuffers does nothing.
+// - A display is a canvas, named by the CSS selector passed to eglGetDisplay,
+//   or #canvas for EGL_DEFAULT_DISPLAY. Contexts need no config
+//   (EGL_KHR_no_config_context) and no surface (EGL_KHR_surfaceless_context).
+// - A context is a WebGL 2 context on its display's canvas, and a window
+//   surface is that canvas's default framebuffer: WebGL contexts can't share
+//   objects or draw to other canvases. The browser shows the framebuffer when
+//   control returns to it, so eglSwapBuffers does nothing.
 // - EGL_KHR_fence_sync is WebGL 2 fences. WebGL only updates a fence between
 //   tasks, even after glFinish(), so a fence created before a glFinish() is
 //   reported as signaled, and a wait with a timeout calls glFinish() instead of
@@ -49,6 +51,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // GL entry points from Emscripten's WebGL library. They are declared here
 // instead of including GLES3/gl3.h, which would clash with Dawn's GL headers.
@@ -72,19 +75,24 @@ constexpr unsigned int kGLConditionSatisfied = 0x911C;
 constexpr unsigned int kGLSyncStatus = 0x9114;
 constexpr unsigned int kGLSignaled = 0x9119;
 
-// TODO: Let the embedder choose the canvas the context is created on.
-constexpr const char* kCanvasSelector = "#canvas";
+// The canvas of the default display, as in Emscripten's default shell.
+constexpr const char* kDefaultCanvasSelector = "#canvas";
 
 // Handles are small non-null integers cast to pointers.
-EGLDisplay const kDisplay = reinterpret_cast<EGLDisplay>(1);
 EGLConfig const kConfig = reinterpret_cast<EGLConfig>(1);
 
 struct WindowSurface {
     std::string selector;
 };
 
+// Each display is a canvas, named by its CSS selector: contexts are created on it, and it is the
+// only canvas they can present to, since WebGL contexts can't share objects. A display's handle
+// is its index here plus one.
+std::vector<std::string> gDisplays;
+
 EGLint gError = EGL_SUCCESS;
 EGLenum gAPI = EGL_OPENGL_ES_API;
+EGLDisplay gCurrentDisplay = EGL_NO_DISPLAY;
 EGLContext gCurrentContext = EGL_NO_CONTEXT;
 EGLSurface gCurrentDraw = EGL_NO_SURFACE;
 EGLSurface gCurrentRead = EGL_NO_SURFACE;
@@ -119,6 +127,19 @@ EGLBoolean Succeed() {
     return EGL_TRUE;
 }
 
+// The selector of |display|'s canvas, or nullptr if |display| isn't a display.
+const char* CanvasOf(EGLDisplay display) {
+    uintptr_t index = reinterpret_cast<uintptr_t>(display);
+    if (index == 0 || index > gDisplays.size()) {
+        return nullptr;
+    }
+    return gDisplays[index - 1].c_str();
+}
+
+bool IsDisplay(EGLDisplay display) {
+    return CanvasOf(display) != nullptr;
+}
+
 EMSCRIPTEN_WEBGL_CONTEXT_HANDLE ToWebGL(EGLContext context) {
     return reinterpret_cast<EMSCRIPTEN_WEBGL_CONTEXT_HANDLE>(context);
 }
@@ -143,7 +164,7 @@ EGLBoolean EGLAPIENTRY ChooseConfig(EGLDisplay display,
                                     EGLConfig* configs,
                                     EGLint configSize,
                                     EGLint* numConfig) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         return Fail(EGL_BAD_DISPLAY);
     }
     // The canvas is RGBA8 with no depth or stencil.
@@ -185,7 +206,7 @@ EGLContext EGLAPIENTRY CreateContext(EGLDisplay display,
                                      EGLConfig,
                                      EGLContext shareContext,
                                      const EGLint*) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         Fail(EGL_BAD_DISPLAY);
         return EGL_NO_CONTEXT;
     }
@@ -208,7 +229,7 @@ EGLContext EGLAPIENTRY CreateContext(EGLDisplay display,
     attributes.preserveDrawingBuffer = false;
     attributes.enableExtensionsByDefault = true;
     EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context =
-        emscripten_webgl_create_context(kCanvasSelector, &attributes);
+        emscripten_webgl_create_context(CanvasOf(display), &attributes);
     if (context <= 0) {
         Fail(EGL_BAD_ALLOC);
         return EGL_NO_CONTEXT;
@@ -234,14 +255,14 @@ EGLSurface EGLAPIENTRY CreateWindowSurface(EGLDisplay display,
                                            EGLConfig,
                                            EGLNativeWindowType window,
                                            const EGLint*) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         Fail(EGL_BAD_DISPLAY);
         return EGL_NO_SURFACE;
     }
     // The native window is the canvas's CSS selector.
     const char* selector = reinterpret_cast<const char*>(window);
     // Only the canvas the contexts render to can be presented to.
-    if (selector == nullptr || !SameCanvas(selector, kCanvasSelector)) {
+    if (selector == nullptr || !SameCanvas(selector, CanvasOf(display))) {
         Fail(EGL_BAD_NATIVE_WINDOW);
         return EGL_NO_SURFACE;
     }
@@ -250,7 +271,7 @@ EGLSurface EGLAPIENTRY CreateWindowSurface(EGLDisplay display,
 }
 
 EGLBoolean EGLAPIENTRY DestroyContext(EGLDisplay display, EGLContext context) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         return Fail(EGL_BAD_DISPLAY);
     }
     if (context == gCurrentContext) {
@@ -261,7 +282,7 @@ EGLBoolean EGLAPIENTRY DestroyContext(EGLDisplay display, EGLContext context) {
 }
 
 EGLBoolean EGLAPIENTRY DestroySurface(EGLDisplay display, EGLSurface surface) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         return Fail(EGL_BAD_DISPLAY);
     }
     if (surface == EGL_NO_SURFACE) {
@@ -275,7 +296,7 @@ EGLBoolean EGLAPIENTRY GetConfigAttrib(EGLDisplay display,
                                        EGLConfig config,
                                        EGLint attribute,
                                        EGLint* value) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         return Fail(EGL_BAD_DISPLAY);
     }
     if (config != kConfig) {
@@ -312,15 +333,25 @@ EGLBoolean EGLAPIENTRY GetConfigs(EGLDisplay display,
 }
 
 EGLDisplay EGLAPIENTRY GetCurrentDisplay() {
-    return gCurrentContext == EGL_NO_CONTEXT ? EGL_NO_DISPLAY : kDisplay;
+    return gCurrentContext == EGL_NO_CONTEXT ? EGL_NO_DISPLAY : gCurrentDisplay;
 }
 
 EGLSurface EGLAPIENTRY GetCurrentSurface(EGLint readdraw) {
     return readdraw == EGL_READ ? gCurrentRead : gCurrentDraw;
 }
 
-EGLDisplay EGLAPIENTRY GetDisplay(EGLNativeDisplayType) {
-    return kDisplay;
+// The native display is the canvas's CSS selector, or EGL_DEFAULT_DISPLAY for #canvas.
+EGLDisplay EGLAPIENTRY GetDisplay(EGLNativeDisplayType nativeDisplay) {
+    const char* selector = nativeDisplay == EGL_DEFAULT_DISPLAY
+                               ? kDefaultCanvasSelector
+                               : reinterpret_cast<const char*>(nativeDisplay);
+    for (size_t i = 0; i < gDisplays.size(); i++) {
+        if (SameCanvas(selector, gDisplays[i].c_str())) {
+            return reinterpret_cast<EGLDisplay>(i + 1);
+        }
+    }
+    gDisplays.push_back(selector);
+    return reinterpret_cast<EGLDisplay>(gDisplays.size());
 }
 
 EGLint EGLAPIENTRY GetError() {
@@ -330,7 +361,7 @@ EGLint EGLAPIENTRY GetError() {
 }
 
 EGLBoolean EGLAPIENTRY Initialize(EGLDisplay display, EGLint* major, EGLint* minor) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         return Fail(EGL_BAD_DISPLAY);
     }
     if (major != nullptr) {
@@ -346,7 +377,7 @@ EGLBoolean EGLAPIENTRY MakeCurrent(EGLDisplay display,
                                    EGLSurface draw,
                                    EGLSurface read,
                                    EGLContext context) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         return Fail(EGL_BAD_DISPLAY);
     }
     if (context == EGL_NO_CONTEXT && (draw != EGL_NO_SURFACE || read != EGL_NO_SURFACE)) {
@@ -357,6 +388,7 @@ EGLBoolean EGLAPIENTRY MakeCurrent(EGLDisplay display,
             return Fail(EGL_BAD_CONTEXT);
         }
     }
+    gCurrentDisplay = context == EGL_NO_CONTEXT ? EGL_NO_DISPLAY : display;
     gCurrentContext = context;
     gCurrentDraw = draw;
     gCurrentRead = read;
@@ -367,7 +399,7 @@ EGLBoolean EGLAPIENTRY QueryContext(EGLDisplay display,
                                     EGLContext,
                                     EGLint attribute,
                                     EGLint* value) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         return Fail(EGL_BAD_DISPLAY);
     }
     switch (attribute) {
@@ -388,7 +420,7 @@ const char* EGLAPIENTRY QueryString(EGLDisplay display, EGLint name) {
         Fail(EGL_BAD_DISPLAY);
         return nullptr;
     }
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         Fail(EGL_BAD_DISPLAY);
         return nullptr;
     }
@@ -413,7 +445,7 @@ EGLBoolean EGLAPIENTRY QuerySurface(EGLDisplay display,
                                     EGLSurface surface,
                                     EGLint attribute,
                                     EGLint* value) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         return Fail(EGL_BAD_DISPLAY);
     }
     if (surface == EGL_NO_SURFACE) {
@@ -439,7 +471,7 @@ EGLBoolean EGLAPIENTRY QuerySurface(EGLDisplay display,
 }
 
 EGLBoolean EGLAPIENTRY SwapBuffers(EGLDisplay display, EGLSurface surface) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         return Fail(EGL_BAD_DISPLAY);
     }
     if (surface == EGL_NO_SURFACE) {
@@ -450,7 +482,7 @@ EGLBoolean EGLAPIENTRY SwapBuffers(EGLDisplay display, EGLSurface surface) {
 }
 
 EGLBoolean EGLAPIENTRY Terminate(EGLDisplay display) {
-    return display == kDisplay ? Succeed() : Fail(EGL_BAD_DISPLAY);
+    return IsDisplay(display) ? Succeed() : Fail(EGL_BAD_DISPLAY);
 }
 
 EGLBoolean EGLAPIENTRY WaitGL() {
@@ -477,7 +509,7 @@ EGLBoolean EGLAPIENTRY SurfaceAttrib(EGLDisplay, EGLSurface, EGLint, EGLint) {
 
 EGLBoolean EGLAPIENTRY SwapInterval(EGLDisplay display, EGLint) {
     // The browser presents at its own rate.
-    return display == kDisplay ? Succeed() : Fail(EGL_BAD_DISPLAY);
+    return IsDisplay(display) ? Succeed() : Fail(EGL_BAD_DISPLAY);
 }
 
 // EGL 1.2
@@ -504,7 +536,10 @@ EGLSurface EGLAPIENTRY CreatePbufferFromClientBuffer(EGLDisplay,
 }
 
 EGLBoolean EGLAPIENTRY ReleaseThread() {
-    return MakeCurrent(kDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (gCurrentContext == EGL_NO_CONTEXT) {
+        return Succeed();
+    }
+    return MakeCurrent(gCurrentDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 }
 
 EGLBoolean EGLAPIENTRY WaitClient() {
@@ -520,7 +555,7 @@ EGLContext EGLAPIENTRY GetCurrentContext() {
 // EGL_KHR_fence_sync
 
 EGLSyncKHR EGLAPIENTRY CreateSyncKHR(EGLDisplay display, EGLenum type, const EGLint* attribs) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         Fail(EGL_BAD_DISPLAY);
         return EGL_NO_SYNC_KHR;
     }
@@ -543,7 +578,7 @@ EGLSyncKHR EGLAPIENTRY CreateSyncKHR(EGLDisplay display, EGLenum type, const EGL
 }
 
 EGLBoolean EGLAPIENTRY DestroySyncKHR(EGLDisplay display, EGLSyncKHR sync) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         return Fail(EGL_BAD_DISPLAY);
     }
     gFinishCountAtFence.erase(sync);
@@ -555,7 +590,7 @@ EGLint EGLAPIENTRY ClientWaitSyncKHR(EGLDisplay display,
                                      EGLSyncKHR sync,
                                      EGLint flags,
                                      EGLTimeKHR timeout) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         Fail(EGL_BAD_DISPLAY);
         return EGL_FALSE;
     }
@@ -590,7 +625,7 @@ EGLBoolean EGLAPIENTRY GetSyncAttribKHR(EGLDisplay display,
                                         EGLSyncKHR sync,
                                         EGLint attribute,
                                         EGLint* value) {
-    if (display != kDisplay) {
+    if (!IsDisplay(display)) {
         return Fail(EGL_BAD_DISPLAY);
     }
     switch (attribute) {
@@ -663,6 +698,15 @@ const Proc kProcs[] = {
 #undef PROC
 
 }  // anonymous namespace
+
+EGLDisplay EmscriptenEGLGetCanvasDisplay(const char* canvas) {
+    return GetDisplay(reinterpret_cast<EGLNativeDisplayType>(const_cast<char*>(canvas)));
+}
+
+bool EmscriptenEGLDisplayIsCanvas(EGLDisplay display, const char* canvas) {
+    const char* displayCanvas = CanvasOf(display);
+    return displayCanvas != nullptr && SameCanvas(canvas, displayCanvas);
+}
 
 __eglMustCastToProperFunctionPointerType EGLAPIENTRY EmscriptenEGLGetProcAddress(const char* name) {
     if (std::strncmp(name, "egl", 3) == 0) {

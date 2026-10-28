@@ -37,9 +37,13 @@
 #include "src/dawn/common/GPUInfo.h"
 #include "src/dawn/native/ChainUtils.h"
 #include "src/dawn/native/Instance.h"
+#include "src/dawn/native/Surface.h"
 #include "src/dawn/native/opengl/ContextEGL.h"
 #include "src/dawn/native/opengl/DeviceGL.h"
 #include "src/dawn/native/opengl/DisplayEGL.h"
+#if defined(__EMSCRIPTEN__)
+#include "src/dawn/native/opengl/EGLEmscripten.h"
+#endif
 #include "src/dawn/native/opengl/SwapChainEGL.h"
 #include "src/dawn/native/opengl/UtilsGL.h"
 #include "src/utils/compiler.h"
@@ -612,8 +616,18 @@ bool PhysicalDevice::SupportsFeatureLevel(wgpu::FeatureLevel featureLevel) const
 }
 
 ResultOrError<PhysicalDeviceSurfaceCapabilities> PhysicalDevice::GetSurfaceCapabilities(
-    const Surface*) const {
+    const Surface* surface) const {
     PhysicalDeviceSurfaceCapabilities capabilities;
+
+#if defined(__EMSCRIPTEN__)
+    // WebGL contexts only draw to their own canvas. The adapter can't be configured for any other
+    // canvas, so programs choose the canvas with the adapter's compatible surface.
+    if (surface->GetType() == Surface::Type::EmscriptenCanvas &&
+        !EmscriptenEGLDisplayIsCanvas(mDisplay->GetDisplay(),
+                                      surface->GetCanvasSelector().c_str())) {
+        return capabilities;
+    }
+#endif
 
     capabilities.usages = wgpu::TextureUsage::RenderAttachment |
                           wgpu::TextureUsage::StorageBinding | wgpu::TextureUsage::TextureBinding |

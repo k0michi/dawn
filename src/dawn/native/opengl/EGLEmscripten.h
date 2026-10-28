@@ -35,6 +35,12 @@ namespace dawn::native::opengl {
 // eglGetProcAddress for EGL over Emscripten's WebGL 2, see EGLEmscripten.cpp.
 __eglMustCastToProperFunctionPointerType EGLAPIENTRY EmscriptenEGLGetProcAddress(const char* name);
 
+// The display of the canvas named by the CSS selector |canvas|.
+EGLDisplay EmscriptenEGLGetCanvasDisplay(const char* canvas);
+
+// Whether |display| is the canvas named by the CSS selector |canvas|.
+bool EmscriptenEGLDisplayIsCanvas(EGLDisplay display, const char* canvas);
+
 }  // namespace dawn::native::opengl
 
 #endif  // SRC_DAWN_NATIVE_OPENGL_EGLEMSCRIPTEN_H_

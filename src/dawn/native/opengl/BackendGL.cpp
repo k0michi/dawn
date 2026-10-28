@@ -38,6 +38,7 @@
 #include "src/dawn/native/opengl/PhysicalDeviceGL.h"
 
 #if defined(__EMSCRIPTEN__)
+#include "src/dawn/native/Surface.h"
 #include "src/dawn/native/opengl/EGLEmscripten.h"
 #endif
 
@@ -130,11 +131,17 @@ std::vector<Ref<PhysicalDeviceBase>> Backend::DiscoverPhysicalDevices(
     }
 
 #if defined(__EMSCRIPTEN__)
-    // There is no libEGL to load: EGL is implemented over WebGL 2.
+    // There is no libEGL to load: EGL is implemented over WebGL 2, with a display for each
+    // canvas. The adapter draws to the canvas of the compatible surface, or to #canvas.
     if (!options.Get<RequestAdapterOptionsGetGLProc>()) {
+        EGLDisplay display = EGL_NO_DISPLAY;
+        if (options->compatibleSurface != nullptr &&
+            options->compatibleSurface->GetType() == Surface::Type::EmscriptenCanvas) {
+            display = EmscriptenEGLGetCanvasDisplay(
+                options->compatibleSurface->GetCanvasSelector().c_str());
+        }
         SwallowDiscoveryError(AppendNewDeviceFrom(
-            DisplayEGL::CreateFromProcAndDisplay(GetType(), EmscriptenEGLGetProcAddress,
-                                                 EGL_NO_DISPLAY),
+            DisplayEGL::CreateFromProcAndDisplay(GetType(), EmscriptenEGLGetProcAddress, display),
             angleVirtualizationGroup));
         return devices;
     }
