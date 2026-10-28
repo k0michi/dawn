@@ -314,6 +314,70 @@ void TestDepth32Float() {
         });
 }
 
+// Writes the stencil aspect of a 2-layer |format| texture and copies both layers to a buffer.
+// WebGL 2 shaders can't read stencil values, so the copy goes through a stencil test per bit.
+void TestStencil(const char* name, wgpu::TextureFormat format) {
+    wgpu::TextureDescriptor textureDescriptor{
+        .usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc,
+        .size = {kWidth, kHeight, kLayers},
+        .format = format,
+    };
+    wgpu::Texture texture = device.CreateTexture(&textureDescriptor);
+    // Every bit set and clear somewhere, including 0x00, 0x80 and 0xff.
+    std::vector<uint8_t> stencil(kWidth * kHeight * kLayers);
+    for (uint32_t i = 0; i < stencil.size(); i++) {
+        stencil[i] = uint8_t(i * 37 + 0x80);
+    }
+    stencil[1] = 0x00;
+    stencil[2] = 0xff;
+    wgpu::TexelCopyTextureInfo whole{.texture = texture, .aspect = wgpu::TextureAspect::StencilOnly};
+    wgpu::TexelCopyBufferLayout dataLayout{.bytesPerRow = kWidth, .rowsPerImage = kHeight};
+    wgpu::Extent3D size{kWidth, kHeight, kLayers};
+    device.GetQueue().WriteTexture(&whole, stencil.data(), stencil.size(), &dataLayout, &size);
+
+    const uint64_t bufferSize = kBytesPerRow * kHeight * kLayers;
+    wgpu::BufferDescriptor bufferDescriptor{
+        .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead, .size = bufferSize};
+    wgpu::Buffer buffer = device.CreateBuffer(&bufferDescriptor);
+    wgpu::TexelCopyBufferInfo destination{
+        .layout = {.bytesPerRow = kBytesPerRow, .rowsPerImage = kHeight}, .buffer = buffer};
+    std::string error = ValidationErrorOf([&] {
+        wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+        encoder.CopyTextureToBuffer(&whole, &destination, &size);
+        wgpu::CommandBuffer commands = encoder.Finish();
+        device.GetQueue().Submit(1, &commands);
+    });
+    if (!error.empty()) {
+        Check(name, false, "copying: " + error.substr(0, error.find('\n')));
+        return;
+    }
+
+    pending++;
+    buffer.MapAsync(
+        wgpu::MapMode::Read, 0, bufferSize, wgpu::CallbackMode::AllowProcessEvents,
+        [name, buffer, stencil, bufferSize](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+            pending--;
+            if (status != wgpu::MapAsyncStatus::Success) {
+                Check(name, false, "mapAsync failed: " + ToString(message));
+                return;
+            }
+            const auto* data = static_cast<const uint8_t*>(buffer.GetConstMappedRange(0, bufferSize));
+            std::string why;
+            for (uint32_t layer = 0; layer < kLayers && why.empty(); layer++) {
+                for (uint32_t y = 0; y < kHeight && why.empty(); y++) {
+                    const uint8_t* row = data + (layer * kHeight + y) * kBytesPerRow;
+                    const uint8_t* expected = stencil.data() + (layer * kHeight + y) * kWidth;
+                    if (std::memcmp(row, expected, kWidth) != 0) {
+                        why = "layer " + std::to_string(layer) + " row " + std::to_string(y) +
+                              ": got " + Bytes(row, kWidth) + " expected " + Bytes(expected, kWidth);
+                    }
+                }
+            }
+            Check(name, why.empty(), why);
+            buffer.Unmap();
+        });
+}
+
 }  // namespace
 
 int main() {
@@ -330,6 +394,8 @@ int main() {
     }
     TestBGRA8BufferToTexture();
     TestDepth32Float();
+    TestStencil("stencil8", wgpu::TextureFormat::Stencil8);
+    TestStencil("depth24plus-stencil8 stencil", wgpu::TextureFormat::Depth24PlusStencil8);
     FinishWhen([] { return pending == 0; });
     return 0;
 }
