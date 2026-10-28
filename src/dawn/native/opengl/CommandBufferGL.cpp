@@ -1033,9 +1033,6 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                     GetSubresourcesAffectedByCopy(src, copy->copySize.ToExtent3D());
                 DAWN_TRY(texture->EnsureSubresourceContentInitialized(gl, subresources));
 #if defined(__EMSCRIPTEN__)
-                if (buffer->GetDataTarget() == GL_ELEMENT_ARRAY_BUFFER) {
-                    buffer->NoteMayContainRestartIndex16();
-                }
                 // WebGL 2 has no compute shaders for the blits that copy what glReadPixels
                 // can't read.
                 if (UsesTransformFeedbackForTextureToBufferCopy(texture, src.aspect)) {
@@ -1054,7 +1051,15 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
 
                 const TypedTexelBlockInfo& blockInfo = GetBlockInfo(src);
 
+#if defined(__EMSCRIPTEN__)
+                // WebGL doesn't let index buffers be bound for glReadPixels: read them to the CPU
+                // and write each row to its place (see ReadPixelsTo below).
+                const bool readToCPU = buffer->GetDataTarget() == GL_ELEMENT_ARRAY_BUFFER;
+                DAWN_GL_TRY(gl, BindBuffer(GL_PIXEL_PACK_BUFFER,
+                                           readToCPU ? 0 : buffer->GetHandle()));
+#else
                 DAWN_GL_TRY(gl, BindBuffer(GL_PIXEL_PACK_BUFFER, buffer->GetHandle()));
+#endif
                 DAWN_GL_TRY(gl, PixelStorei(GL_PACK_ALIGNMENT, std::min(8u, blockInfo.byteSize)));
                 DAWN_GL_TRY(
                     gl, PixelStorei(GL_PACK_ROW_LENGTH, dchecked_cast<uint32_t>(dst.blocksPerRow)));
@@ -1088,6 +1093,42 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                 }
 
                 uint8_t* offset = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(dst.offset));
+
+                // Reads the copied region of the attached image to |offset| in the buffer.
+                auto ReadPixelsTo = [&](uint8_t* offset) -> MaybeError {
+#if defined(__EMSCRIPTEN__)
+                    if (readToCPU) {
+                        const uint32_t width = dchecked_cast<uint32_t>(copySize.width);
+                        const uint32_t height = dchecked_cast<uint32_t>(copySize.height);
+                        const size_t rowBytes = size_t(width) * blockInfo.byteSize;
+                        std::vector<uint8_t> pixels(rowBytes * height);
+                        DAWN_GL_TRY(gl, PixelStorei(GL_PACK_ROW_LENGTH, 0));
+                        DAWN_GL_TRY(gl, PixelStorei(GL_PACK_ALIGNMENT, 1));
+                        DAWN_GL_TRY(gl, ReadPixels(dchecked_cast<uint32_t>(src.origin.x),
+                                                   dchecked_cast<uint32_t>(src.origin.y), width,
+                                                   height, glFormat, glType, pixels.data()));
+                        const uint64_t bytesPerRow = blockInfo.ToBytes(dst.blocksPerRow);
+                        const uint64_t at = reinterpret_cast<uintptr_t>(offset);
+                        DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER, buffer->GetHandle()));
+                        for (uint32_t y = 0; y < height; y++) {
+                            const uint8_t* row = DAWN_UNSAFE_TODO(pixels.data() + y * rowBytes);
+                            const uint64_t rowOffset = at + y * bytesPerRow;
+                            buffer->NoteWrittenData(rowOffset, row, rowBytes);
+                            DAWN_GL_TRY(gl, BufferSubData(GL_COPY_WRITE_BUFFER,
+                                                          checked_cast<GLintptr>(rowOffset),
+                                                          checked_cast<GLsizeiptr>(rowBytes), row));
+                        }
+                        DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER, 0));
+                        return {};
+                    }
+#endif
+                    DAWN_GL_TRY(gl, ReadPixels(dchecked_cast<uint32_t>(src.origin.x),
+                                               dchecked_cast<uint32_t>(src.origin.y),
+                                               dchecked_cast<uint32_t>(copySize.width),
+                                               dchecked_cast<uint32_t>(copySize.height),
+                                               glFormat, glType, offset));
+                    return {};
+                };
                 switch (texture->GetDimension()) {
                     case wgpu::TextureDimension::Undefined:
                         DAWN_UNREACHABLE();
@@ -1099,11 +1140,7 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                                                 GL_READ_FRAMEBUFFER, glAttachment, target,
                                                 texture->GetTextureHandle(), src.mipLevel));
                             DAWN_TRY(CheckFramebufferComplete(gl, GL_READ_FRAMEBUFFER));
-                            DAWN_GL_TRY(gl, ReadPixels(dchecked_cast<uint32_t>(src.origin.x),
-                                                       dchecked_cast<uint32_t>(src.origin.y),
-                                                       dchecked_cast<uint32_t>(copySize.width),
-                                                       dchecked_cast<uint32_t>(copySize.height),
-                                                       glFormat, glType, offset));
+                            DAWN_TRY(ReadPixelsTo(offset));
                             break;
                         } else if (target == GL_TEXTURE_CUBE_MAP) {
                             DAWN_ASSERT(texture->GetArrayLayers() == 6);
@@ -1164,11 +1201,7 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                                                                      texture->GetTextureHandle(),
                                                                      src.mipLevel));
                                 DAWN_TRY(CheckFramebufferComplete(gl, GL_READ_FRAMEBUFFER));
-                                DAWN_GL_TRY(gl, ReadPixels(dchecked_cast<uint32_t>(src.origin.x),
-                                                           dchecked_cast<uint32_t>(src.origin.y),
-                                                           dchecked_cast<uint32_t>(copySize.width),
-                                                           dchecked_cast<uint32_t>(copySize.height),
-                                                           glFormat, glType, offset));
+                                DAWN_TRY(ReadPixelsTo(offset));
                                 DAWN_UNSAFE_TODO(offset += bytesPerImage);
                             }
                             break;
@@ -1186,11 +1219,7 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                                                 texture->GetTextureHandle(), src.mipLevel,
                                                 dchecked_cast<uint32_t>(src.origin.z + z)));
                             DAWN_TRY(CheckFramebufferComplete(gl, GL_READ_FRAMEBUFFER));
-                            DAWN_GL_TRY(gl, ReadPixels(dchecked_cast<uint32_t>(src.origin.x),
-                                                       dchecked_cast<uint32_t>(src.origin.y),
-                                                       dchecked_cast<uint32_t>(copySize.width),
-                                                       dchecked_cast<uint32_t>(copySize.height),
-                                                       glFormat, glType, offset));
+                            DAWN_TRY(ReadPixelsTo(offset));
 
                             DAWN_UNSAFE_TODO(offset += bytesPerImage);
                         }
