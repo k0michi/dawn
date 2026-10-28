@@ -1590,7 +1590,8 @@ void DeviceBase::ScheduleTick() {
         [](void* data) {
             std::unique_ptr<Ref<DeviceBase>> device(static_cast<Ref<DeviceBase>*>(data));
             (*device)->mTickScheduled = false;
-            if ((*device)->APITick()) {
+            // A lost device finishes its work in the next tick.
+            if ((*device)->APITick() || (*device)->GetState() == State::Disconnecting) {
                 (*device)->ScheduleTick();
             }
         },

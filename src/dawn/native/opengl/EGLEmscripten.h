@@ -44,6 +44,16 @@ bool EmscriptenEGLHasStencilTexturing();
 // Whether |display| is the canvas named by the CSS selector |canvas|.
 bool EmscriptenEGLDisplayIsCanvas(EGLDisplay display, const char* canvas);
 
+// Calls |callback| with |userdata| when the WebGL context of |display|'s canvas is lost, in the
+// task of the browser's webglcontextlost event, until it is removed.
+using EmscriptenEGLContextLostCallback = void (*)(void* userdata);
+void EmscriptenEGLAddContextLostCallback(EGLDisplay display,
+                                         EmscriptenEGLContextLostCallback callback,
+                                         void* userdata);
+void EmscriptenEGLRemoveContextLostCallback(EGLDisplay display,
+                                            EmscriptenEGLContextLostCallback callback,
+                                            void* userdata);
+
 }  // namespace dawn::native::opengl
 
 #endif  // SRC_DAWN_NATIVE_OPENGL_EGLEMSCRIPTEN_H_

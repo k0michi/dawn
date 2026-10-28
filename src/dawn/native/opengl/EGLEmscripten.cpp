@@ -40,6 +40,10 @@
 //   tasks, even after glFinish(), so a fence created before a glFinish() is
 //   reported as signaled, and a wait with a timeout calls glFinish() instead of
 //   blocking. glFinish() is wrapped to count the calls.
+// - A lost WebGL context is EGL_CONTEXT_LOST. The shim listens for the
+//   canvas's webglcontextlost event, so that the backend learns of the loss
+//   without a GL call failing, and lets the browser restore the context, after
+//   which contexts can be created on the canvas again.
 
 #include "src/dawn/native/opengl/EGLEmscripten.h"
 
@@ -47,6 +51,7 @@
 #include <emscripten/html5.h>
 #include <emscripten/html5_webgl.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -90,6 +95,17 @@ struct WindowSurface {
 // is its index here plus one.
 std::vector<std::string> gDisplays;
 
+// The callbacks for the loss of each display's context, and the displays that listen for it.
+struct ContextLostCallback {
+    uintptr_t display;
+    EmscriptenEGLContextLostCallback callback;
+    void* userdata;
+
+    bool operator==(const ContextLostCallback&) const = default;
+};
+std::vector<ContextLostCallback> gContextLostCallbacks;
+std::vector<uintptr_t> gListeningDisplays;
+
 // Whether contexts have WEBGL_stencil_texturing, which Emscripten doesn't enable by itself.
 bool gStencilTexturing = false;
 
@@ -130,6 +146,14 @@ EGLBoolean Succeed() {
     return EGL_TRUE;
 }
 
+// Fails a call on the current context with EGL_CONTEXT_LOST if it is lost, or with |error|.
+EGLBoolean FailOnCurrentContext(EGLint error) {
+    bool lost = gCurrentContext != EGL_NO_CONTEXT &&
+                emscripten_is_webgl_context_lost(
+                    reinterpret_cast<EMSCRIPTEN_WEBGL_CONTEXT_HANDLE>(gCurrentContext));
+    return Fail(lost ? EGL_CONTEXT_LOST : error);
+}
+
 // The selector of |display|'s canvas, or nullptr if |display| isn't a display.
 const char* CanvasOf(EGLDisplay display) {
     uintptr_t index = reinterpret_cast<uintptr_t>(display);
@@ -158,6 +182,45 @@ bool SameCanvas(const char* a, const char* b) {
             return a !== null && a === document.querySelector(UTF8ToString($1));
         },
         a, b);
+}
+
+bool OnContextLost(int, const void*, void* userdata) {
+    uintptr_t display = reinterpret_cast<uintptr_t>(userdata);
+    // Callbacks may remove themselves.
+    std::vector<ContextLostCallback> callbacks;
+    for (const ContextLostCallback& callback : gContextLostCallbacks) {
+        if (callback.display == display) {
+            callbacks.push_back(callback);
+        }
+    }
+    for (const ContextLostCallback& callback : callbacks) {
+        callback.callback(callback.userdata);
+    }
+    // Prevent the default, so that the browser may restore the context.
+    return true;
+}
+
+// Forgets a WebGL context. Unlike emscripten_webgl_destroy_context(), this keeps the event
+// handlers on the canvas, the program's and the shim's, and the canvas's record of the contexts
+// that are left on it.
+void DeleteWebGLContext(EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context) {
+    MAIN_THREAD_EM_ASM(
+        {
+            const context = GL.contexts[$0];
+            if (!context) {
+                return;
+            }
+            if (GL.currentContext === context) {
+                GL.currentContext = null;
+            }
+            GL.contexts[$0] = null;
+            const canvas = context.GLctx.canvas;
+            if (canvas && canvas.GLctxObject === context) {
+                canvas.GLctxObject =
+                    GL.contexts.find((other) => other && other.GLctx === context.GLctx);
+            }
+        },
+        context);
 }
 
 // EGL 1.0
@@ -237,6 +300,12 @@ EGLContext EGLAPIENTRY CreateContext(EGLDisplay display,
         Fail(EGL_BAD_ALLOC);
         return EGL_NO_CONTEXT;
     }
+    // A canvas keeps its context after losing it, until the browser restores it.
+    if (emscripten_is_webgl_context_lost(context)) {
+        DeleteWebGLContext(context);
+        Fail(EGL_CONTEXT_LOST);
+        return EGL_NO_CONTEXT;
+    }
     // GL_DEPTH_STENCIL_TEXTURE_MODE, for sampling the stencil of depth-stencil textures.
     gStencilTexturing = emscripten_webgl_enable_extension(context, "WEBGL_stencil_texturing");
     Succeed();
@@ -282,7 +351,7 @@ EGLBoolean EGLAPIENTRY DestroyContext(EGLDisplay display, EGLContext context) {
     if (context == gCurrentContext) {
         gCurrentContext = EGL_NO_CONTEXT;
     }
-    emscripten_webgl_destroy_context(ToWebGL(context));
+    DeleteWebGLContext(ToWebGL(context));
     return Succeed();
 }
 
@@ -574,7 +643,7 @@ EGLSyncKHR EGLAPIENTRY CreateSyncKHR(EGLDisplay display, EGLenum type, const EGL
     }
     void* sync = glFenceSync(kGLSyncGPUCommandsComplete, 0);
     if (sync == nullptr) {
-        Fail(EGL_BAD_ALLOC);
+        FailOnCurrentContext(EGL_BAD_ALLOC);
         return EGL_NO_SYNC_KHR;
     }
     gFinishCountAtFence[sync] = gFinishCount;
@@ -621,7 +690,8 @@ EGLint EGLAPIENTRY ClientWaitSyncKHR(EGLDisplay display,
             Succeed();
             return EGL_CONDITION_SATISFIED_KHR;
         default:
-            Fail(EGL_BAD_PARAMETER);
+            // GL_WAIT_FAILED, which a lost context returns.
+            FailOnCurrentContext(EGL_BAD_PARAMETER);
             return EGL_FALSE;
     }
 }
@@ -715,6 +785,28 @@ bool EmscriptenEGLHasStencilTexturing() {
 bool EmscriptenEGLDisplayIsCanvas(EGLDisplay display, const char* canvas) {
     const char* displayCanvas = CanvasOf(display);
     return displayCanvas != nullptr && SameCanvas(canvas, displayCanvas);
+}
+
+void EmscriptenEGLAddContextLostCallback(EGLDisplay display,
+                                         EmscriptenEGLContextLostCallback callback,
+                                         void* userdata) {
+    uintptr_t index = reinterpret_cast<uintptr_t>(display);
+    if (!IsDisplay(display)) {
+        return;
+    }
+    if (std::ranges::find(gListeningDisplays, index) == gListeningDisplays.end()) {
+        gListeningDisplays.push_back(index);
+        emscripten_set_webglcontextlost_callback(CanvasOf(display), reinterpret_cast<void*>(index),
+                                                 false, OnContextLost);
+    }
+    gContextLostCallbacks.push_back({index, callback, userdata});
+}
+
+void EmscriptenEGLRemoveContextLostCallback(EGLDisplay display,
+                                            EmscriptenEGLContextLostCallback callback,
+                                            void* userdata) {
+    ContextLostCallback removed = {reinterpret_cast<uintptr_t>(display), callback, userdata};
+    std::erase(gContextLostCallbacks, removed);
 }
 
 __eglMustCastToProperFunctionPointerType EGLAPIENTRY EmscriptenEGLGetProcAddress(const char* name) {

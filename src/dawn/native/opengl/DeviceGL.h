@@ -327,6 +327,9 @@ class Device final : public DeviceBase {
 #if defined(__EMSCRIPTEN__)
     // GL objects for the texture-to-buffer copies with transform feedback.
     TextureToBufferTFCache mTextureToBufferTFCache;
+
+    // Loses the device when the WebGL context is lost.
+    static void OnContextLost(void* userdata);
 #endif
 };
 

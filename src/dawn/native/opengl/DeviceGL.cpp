@@ -59,6 +59,10 @@
 #include "src/dawn/native/AHBFunctions.h"
 #endif  // DAWN_PLATFORM_IS(ANDROID)
 
+#if defined(__EMSCRIPTEN__)
+#include "src/dawn/native/opengl/EGLEmscripten.h"
+#endif
+
 namespace {
 
 void KHRONOS_APIENTRY OnGLDebugMessage(GLenum source,
@@ -229,6 +233,12 @@ MaybeError Device::Initialize(const UnpackedPtr<DeviceDescriptor>& descriptor) {
         DAWN_TRY_ASSIGN(buffer, Buffer::CreateInternalBuffer(this, &desc, false));
         mTextureBuiltinsBuffer = ToBackend(std::move(buffer));
     }
+
+#if defined(__EMSCRIPTEN__)
+    // Release builds check few GL errors, and the device may have nothing to do when the context
+    // is lost, so the device listens for the loss.
+    EmscriptenEGLAddContextLostCallback(GetEGLDisplay(), OnContextLost, this);
+#endif
 
     return scopedCurrentContext.End();
 }
@@ -517,6 +527,10 @@ MaybeError Device::CopyFromStagingToTextureImpl(BufferBase* source,
 void Device::DestroyImpl(DestroyReason reason) {
     DAWN_ASSERT(GetState() == State::Disconnected);
 
+#if defined(__EMSCRIPTEN__)
+    EmscriptenEGLRemoveContextLostCallback(GetEGLDisplay(), OnContextLost, this);
+#endif
+
     mTextureBuiltinsBuffer = nullptr;
 }
 
@@ -602,6 +616,17 @@ ContextEGL* Device::GetContext() const {
 #if defined(__EMSCRIPTEN__)
 TextureToBufferTFCache& Device::GetTextureToBufferTFCache() {
     return mTextureToBufferTFCache;
+}
+
+// static
+void Device::OnContextLost(void* userdata) {
+    Ref<Device> device = static_cast<Device*>(userdata);
+    if (device->IsLost()) {
+        return;
+    }
+    device->ConsumeError(DAWN_BACKEND_DEVICE_LOST_ERROR("The WebGL context was lost."));
+    // Complete the device's work, such as buffer mappings, which cannot finish anymore.
+    device->ScheduleTick();
 }
 #endif
 

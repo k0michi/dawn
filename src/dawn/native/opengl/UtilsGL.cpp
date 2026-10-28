@@ -179,6 +179,17 @@ bool HasAnisotropicFiltering(const OpenGLFunctions& gl) {
     return gl.IsAtLeastGL(4, 6) || gl.IsGLExtensionSupported("GL_EXT_texture_filter_anisotropic");
 }
 
+namespace {
+
+// WebGL reports a lost context with its own error.
+constexpr GLenum kGLContextLostWebGL = 0x9242;
+
+bool IsContextLostError(GLenum error) {
+    return error == GL_CONTEXT_LOST || error == kGLContextLostWebGL;
+}
+
+}  // anonymous namespace
+
 const char* GLErrorAsString(GLenum error) {
 #define ERROR_CASE_STRING(errorEnum) \
     case errorEnum:                  \
@@ -191,6 +202,8 @@ const char* GLErrorAsString(GLenum error) {
         ERROR_CASE_STRING(GL_INVALID_FRAMEBUFFER_OPERATION);
         ERROR_CASE_STRING(GL_OUT_OF_MEMORY);
         ERROR_CASE_STRING(GL_CONTEXT_LOST);
+        case kGLContextLostWebGL:
+            return "CONTEXT_LOST_WEBGL";
         default:
             return "<Unknown OpenGL error>";
     }
@@ -246,7 +259,7 @@ void ClearErrors(const OpenGLFunctions& gl,
     while (error != GL_NO_ERROR) {
         // Skip GL_CONTEXT_LOST errors, they will be generated continuously and result in an
         // infinite loop.
-        if (error == GL_CONTEXT_LOST) {
+        if (IsContextLostError(error)) {
             break;
         }
 
@@ -272,12 +285,12 @@ MaybeError CheckError(const OpenGLFunctions& gl,
 
     // Drain and report all the pending errors. Keep track of whether a context loss was reported
     // by any of them, so that it isn't hidden by an earlier error.
-    bool contextLost = error == GL_CONTEXT_LOST;
+    bool contextLost = IsContextLostError(error);
     GLenum nextError = gl.GetError();
     while (nextError != GL_NO_ERROR) {
         // Skip GL_CONTEXT_LOST errors, they will be generated continuously and result in an
         // infinite loop.
-        if (nextError == GL_CONTEXT_LOST) {
+        if (IsContextLostError(nextError)) {
             contextLost = true;
             break;
         }
