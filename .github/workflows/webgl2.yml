@@ -73,6 +73,7 @@ jobs:
           .github/webgl2/link.sh async-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/async-test"
           .github/webgl2/link.sh canvas-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/canvas-test"
           .github/webgl2/link.sh copy-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/copy-test"
+          .github/webgl2/link.sh msaa-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/msaa-test"
 
       - name: Install Playwright
         shell: bash
@@ -108,6 +109,11 @@ jobs:
         if: success() || failure()
         shell: bash
         run: node .github/webgl2/run-tests.mjs "$RUNNER_TEMP/copy-test"
+
+      - name: MSAA tests
+        if: success() || failure()
+        shell: bash
+        run: node .github/webgl2/run-tests.mjs "$RUNNER_TEMP/msaa-test"
 
       - name: Surface tests
         if: success() || failure()
