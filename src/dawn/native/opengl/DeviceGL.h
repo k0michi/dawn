@@ -240,6 +240,8 @@ class Device final : public DeviceBase {
 
     bool MayRequireDuplicationOfIndirectParameters() const override;
     bool ShouldApplyIndexBufferOffsetToFirstIndex() const override;
+    bool CopiesTextureToBufferWithoutBlit(const TextureBase* texture,
+                                          Aspect aspect) const override;
 
     const AHBFunctions* GetOrLoadAHBFunctions();
 

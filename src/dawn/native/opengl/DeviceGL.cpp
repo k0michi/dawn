@@ -549,6 +549,10 @@ bool Device::ShouldApplyIndexBufferOffsetToFirstIndex() const {
     return true;
 }
 
+bool Device::CopiesTextureToBufferWithoutBlit(const TextureBase* texture, Aspect aspect) const {
+    return UsesTransformFeedbackForTextureToBufferCopy(ToBackend(texture), aspect);
+}
+
 const AHBFunctions* Device::GetOrLoadAHBFunctions() {
 #if DAWN_PLATFORM_IS(ANDROID)
     if (mAHBFunctions == nullptr) {

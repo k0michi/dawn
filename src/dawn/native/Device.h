@@ -419,6 +419,10 @@ class DeviceBase : public ErrorSink,
     // See https://crbug.com/dawn/161
     virtual bool ShouldApplyIndexBufferOffsetToFirstIndex() const;
 
+    // Whether the backend copies |aspect| of |texture| to buffers itself even where toggles ask
+    // for a compute blit, as the OpenGL ES backend does on WebGL 2, which has no compute shaders.
+    virtual bool CopiesTextureToBufferWithoutBlit(const TextureBase* texture, Aspect aspect) const;
+
     // Whether the backend can use textureLoad() on a resolve target in the same render pass that it
     // will be resolved into.
     virtual bool CanTextureLoadResolveTargetInTheSameRenderpass() const;

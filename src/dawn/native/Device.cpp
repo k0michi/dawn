@@ -2630,6 +2630,10 @@ bool DeviceBase::ShouldApplyIndexBufferOffsetToFirstIndex() const {
     return false;
 }
 
+bool DeviceBase::CopiesTextureToBufferWithoutBlit(const TextureBase* texture, Aspect aspect) const {
+    return false;
+}
+
 bool DeviceBase::CanTextureLoadResolveTargetInTheSameRenderpass() const {
     return false;
 }

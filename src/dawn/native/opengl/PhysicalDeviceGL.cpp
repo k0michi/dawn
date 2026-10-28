@@ -501,18 +501,6 @@ void PhysicalDevice::SetupBackendDeviceToggles(dawn::platform::Platform* platfor
     // For OpenGL ES, we must use a placeholder fragment shader for vertex-only render pipeline.
     deviceToggles->Default(Toggle::UsePlaceholderFragmentInVertexOnlyPipeline,
                            gl.GetVersion().IsES());
-#if defined(__EMSCRIPTEN__)
-    // WebGL 2 has no compute shaders for the blits below. The GL backend copies these formats
-    // with transform feedback instead (CopyTextureToBufferWithTransformFeedback). These come
-    // first, since the first default set for a toggle wins.
-    deviceToggles->Default(Toggle::UseBlitForBGRA8UnormTextureToBufferCopy, false);
-    deviceToggles->Default(Toggle::UseBlitForNonRGBAUnormTextureToBufferCopy, false);
-    deviceToggles->Default(Toggle::UseBlitForNonRGBAFloatTextureToBufferCopy, false);
-    deviceToggles->Default(Toggle::UseBlitForFloat16TextureCopy, false);
-    deviceToggles->Default(Toggle::UseBlitForUintTextureToBufferCopy, false);
-    deviceToggles->Default(Toggle::UseBlitForSintTextureToBufferCopy, false);
-#endif
-
     // For OpenGL/OpenGL ES, use compute shader blit to emulate depth16unorm texture to buffer
     // copies.
     deviceToggles->Default(Toggle::UseBlitForDepth16UnormTextureToBufferCopy, true);

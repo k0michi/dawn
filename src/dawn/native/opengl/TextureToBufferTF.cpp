@@ -61,6 +61,10 @@ enum class Packing : uint32_t {
     RGB10A2Uint,
     Float16,
     Float32,
+    Snorm8,
+    Depth16,
+    RG11B10Ufloat,
+    RGB9E5Ufloat,
 };
 
 struct Layout {
@@ -68,7 +72,21 @@ struct Layout {
     uint32_t bytesPerTexel;
 };
 
-std::optional<Layout> GetLayout(wgpu::TextureFormat format) {
+std::optional<Layout> GetLayout(wgpu::TextureFormat format, Aspect aspect) {
+    if (aspect == Aspect::Depth) {
+        switch (format) {
+            case wgpu::TextureFormat::Depth16Unorm:
+                return Layout{Packing::Depth16, 2};
+            case wgpu::TextureFormat::Depth32Float:
+            case wgpu::TextureFormat::Depth32FloatStencil8:
+                return Layout{Packing::Float32, 4};
+            default:
+                return std::nullopt;
+        }
+    }
+    if (aspect != Aspect::Color) {
+        return std::nullopt;
+    }
     switch (format) {
         case wgpu::TextureFormat::R8Unorm:
             return Layout{Packing::Unorm8, 1};
@@ -120,6 +138,18 @@ std::optional<Layout> GetLayout(wgpu::TextureFormat format) {
             return Layout{Packing::Float32, 4};
         case wgpu::TextureFormat::RG32Float:
             return Layout{Packing::Float32, 8};
+        // -128 reads as -1.0 like -127, and is copied as -127.
+        case wgpu::TextureFormat::R8Snorm:
+            return Layout{Packing::Snorm8, 1};
+        case wgpu::TextureFormat::RG8Snorm:
+            return Layout{Packing::Snorm8, 2};
+        case wgpu::TextureFormat::RGBA8Snorm:
+            return Layout{Packing::Snorm8, 4};
+        case wgpu::TextureFormat::RG11B10Ufloat:
+            return Layout{Packing::RG11B10Ufloat, 4};
+        // Values with more than one encoding are copied in the one with the smallest exponent.
+        case wgpu::TextureFormat::RGB9E5Ufloat:
+            return Layout{Packing::RGB9E5Ufloat, 4};
         default:
             return std::nullopt;
     }
@@ -139,6 +169,46 @@ const char* SamplerType(GLenum target) {
             return nullptr;
     }
 }
+
+// Encoders of the formats that GLSL ES 3.00 has no packing functions for. They only see values
+// decoded from the format, so they need no rounding.
+constexpr const char* kEncoders = R"(
+// A float as an unsigned float with 5 exponent bits and |mantissaBits| mantissa bits.
+uint ToUfloat(float f, uint mantissaBits) {
+    if (!(f > 0.0)) {
+        return isnan(f) ? (31u << mantissaBits) | 1u : 0u;
+    }
+    uint bits = floatBitsToUint(f);
+    uint mantissa = bits & 0x7fffffu;
+    int exponent = int(bits >> 23u) - 127 + 15;
+    if (isinf(f) || exponent >= 31) {
+        return 31u << mantissaBits;
+    }
+    if (exponent <= 0) {
+        uint shift = 23u - mantissaBits + uint(1 - exponent);
+        return shift > 31u ? 0u : (mantissa | 0x800000u) >> shift;
+    }
+    return (uint(exponent) << mantissaBits) | (mantissa >> (23u - mantissaBits));
+}
+// RGB in RGB9E5, as OpenGL ES 3.0's section 3.8.3.2 encodes it.
+uint ToRGB9E5(vec3 rgb) {
+    vec3 c = clamp(rgb, 0.0, 65408.0);
+    float maxc = max(c.r, max(c.g, c.b));
+    if (maxc == 0.0) {
+        return 0u;
+    }
+    // floor(log2(maxc)), exactly.
+    int log2Max = int(floatBitsToUint(maxc) >> 23u) - 127;
+    int exponent = max(-16, log2Max) + 16;
+    float scale = exp2(float(exponent - 24));
+    if (uint(floor(maxc / scale + 0.5)) == 512u) {
+        exponent += 1;
+        scale *= 2.0;
+    }
+    uvec3 s = uvec3(floor(c / scale + 0.5));
+    return s.r | (s.g << 9u) | (s.b << 18u) | (uint(exponent) << 27u);
+}
+)";
 
 // A vertex shader in which vertex i packs bytes 4i to 4i+3 of the copied texels, laid out
 // without padding, into `word`, which transform feedback writes to the staging buffer.
@@ -201,6 +271,22 @@ std::string VertexShader(Packing packing, uint32_t bytesPerTexel, GLenum target)
         case Packing::Float32:
             pack = "return floatBitsToUint(v);\n";
             break;
+        case Packing::Snorm8:
+            pack =
+                "uvec4 c = uvec4(ivec4(round(clamp(v, -1.0, 1.0) * 127.0))) & 0xffu;\n"
+                "return uvec4(c.x | (c.y << 8u) | (c.z << 16u) | (c.w << 24u), 0u, 0u, 0u);\n";
+            break;
+        case Packing::Depth16:
+            pack = "return uvec4(uint(round(clamp(v.r, 0.0, 1.0) * 65535.0)), 0u, 0u, 0u);\n";
+            break;
+        case Packing::RG11B10Ufloat:
+            pack =
+                "return uvec4(ToUfloat(v.r, 6u) | (ToUfloat(v.g, 6u) << 11u) |\n"
+                "             (ToUfloat(v.b, 5u) << 22u), 0u, 0u, 0u);\n";
+            break;
+        case Packing::RGB9E5Ufloat:
+            pack = "return uvec4(ToRGB9E5(v.rgb), 0u, 0u, 0u);\n";
+            break;
     }
 
     std::string fetch = target == GL_TEXTURE_2D
@@ -215,7 +301,8 @@ std::string VertexShader(Packing packing, uint32_t bytesPerTexel, GLenum target)
            " src;\n"
            "uniform ivec3 origin;\n"
            "uniform uvec3 copySize;\n"
-           "flat out uint word;\n"
+           "flat out uint word;\n" +
+           std::string(kEncoders) +
            "uvec4 TexelWords(uint x, uint y, uint z) {\n" +
            value + " v = " + fetch + ";\n" + pack +
            "}\n"
@@ -310,7 +397,7 @@ ResultOrError<GLuint> GetProgram(const OpenGLFunctions& gl,
 
 bool UsesTransformFeedbackForTextureToBufferCopy(const Texture* texture, Aspect aspect) {
 #if defined(__EMSCRIPTEN__)
-    return aspect == Aspect::Color && GetLayout(texture->GetFormat().format).has_value() &&
+    return GetLayout(texture->GetFormat().format, aspect).has_value() &&
            SamplerType(texture->GetGLTarget()) != nullptr;
 #else
     return false;
@@ -327,7 +414,7 @@ MaybeError CopyTextureToBufferWithTransformFeedback(const OpenGLFunctions& gl,
 #else
     Texture* texture = ToBackend(source.texture.Get());
     Buffer* buffer = ToBackend(destination.buffer.Get());
-    Layout layout = *GetLayout(texture->GetFormat().format);
+    Layout layout = *GetLayout(texture->GetFormat().format, source.aspect);
     GLenum target = texture->GetGLTarget();
     TextureToBufferTFCache& cache = device->GetTextureToBufferTFCache();
 

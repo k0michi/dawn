@@ -1155,6 +1155,10 @@ bool ShouldUseTextureToBufferBlit(const TextureBase* texture,
                                   const Aspect& aspect) {
     const DeviceBase* device = texture->GetDevice();
 
+    if (device->CopiesTextureToBufferWithoutBlit(texture, aspect)) {
+        return false;
+    }
+
     // Snorm
     if (format.IsSnorm() && device->IsToggleEnabled(Toggle::UseBlitForSnormTextureToBufferCopy)) {
         return true;
