@@ -107,6 +107,9 @@ class PipelineGL {
 
     const StorageBufferSizeImmediateInfo& GetStorageBufferSizeImmediateInfo() const;
 
+    // The uniform location of element |index| of the immediates array.
+    GLint GetImmediateLocation(uint32_t index) const;
+
   protected:
     MaybeError ApplyNow(const OpenGLFunctions& gl, const PipelineLayout* layout);
 
@@ -141,6 +144,9 @@ class PipelineGL {
     // internal uniform buffer.
     EmulatedTextureBuiltinInfo mEmulatedTextureBuiltinInfo;
     StorageBufferSizeImmediateInfo mStorageBufferSizeImmediateInfo;
+
+    // Looked up by name, since GLSL ES 3.00 has no explicit uniform locations.
+    std::vector<GLint> mImmediateLocations;
 };
 
 // Helper class used to allocate the emulated texture builtins in the UBO during the initialization

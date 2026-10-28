@@ -283,6 +283,11 @@ MaybeError PipelineGL::InitializeBase(
             pipelineImmediateMask.reset();
         }
     }
+    for (uint32_t i = 0; i < pipelineImmediateMask.count(); i++) {
+        std::string name = "tint_immediates[" + std::to_string(i) + "]";
+        GLint location = DAWN_GL_TRY(gl, GetUniformLocation(mProgram, name.c_str()));
+        mImmediateLocations.push_back(location);
+    }
 
     for (GLuint glShader : glShaders) {
         DAWN_GL_TRY(gl, DetachShader(mProgram, glShader));
@@ -290,6 +295,11 @@ MaybeError PipelineGL::InitializeBase(
     }
 
     return {};
+}
+
+GLint PipelineGL::GetImmediateLocation(uint32_t index) const {
+    DAWN_ASSERT(index < mImmediateLocations.size());
+    return mImmediateLocations[index];
 }
 
 const std::vector<TextureUnit>& PipelineGL::GetTextureUnitsForSampler(

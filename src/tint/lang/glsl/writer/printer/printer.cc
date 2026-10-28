@@ -1199,8 +1199,8 @@ class Printer : public tint::TextGenerator {
                       ptr->UnwrapPtr()->As<core::type::Struct>());
     }
 
-    /// @returns true if the GLSL version has the binding qualifier and locations on interstage
-    /// variables, which GLSL ES 3.00 lacks.
+    /// @returns true if the GLSL version has the binding qualifier, locations on interstage
+    /// variables and explicit uniform locations, which GLSL ES 3.00 lacks.
     bool HasLayoutBinding() const {
         const auto& version = options_.version;
         return !version.IsES() || version.major_version > 3 ||
@@ -1250,7 +1250,11 @@ class Printer : public tint::TextGenerator {
         constexpr const char* kImmediateVarName = "tint_immediates";
 
         auto out = Line();
-        EmitLayoutLocation(out, {0}, std::nullopt);
+        // GLSL ES 3.00 has no explicit uniform locations: the embedder looks the uniform up by
+        // its fixed name instead.
+        if (HasLayoutBinding()) {
+            EmitLayoutLocation(out, {0}, std::nullopt);
+        }
 
         names_.Add(var->Result(), kImmediateVarName);
         EmitTypeAndName(out, var->Result()->Type(), kImmediateVarName);

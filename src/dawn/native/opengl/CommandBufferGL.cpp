@@ -764,8 +764,8 @@ class ImmediateTracker : public T {
         ImmediateMask uploadBits = this->mDirty & pipelineMask;
         for (auto&& [offset, size] : IterateRanges(uploadBits)) {
             size_t immediateContentStartOffset = size_t{offset} * kImmediateElementByteSize;
-            auto location =
-                GetImmediateIndexInPipeline(static_cast<uint32_t>(offset), pipelineMask);
+            auto location = ToBackend(lastPipeline)->GetImmediateLocation(
+                GetImmediateIndexInPipeline(static_cast<uint32_t>(offset), pipelineMask));
             auto data = ReinterpretSpan<const uint32_t>(this->mContent.GetDataBytes(
                 immediateContentStartOffset, size * kImmediateElementByteSize));
             DAWN_GL_TRY(gl,
