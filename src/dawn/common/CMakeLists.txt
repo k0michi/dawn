@@ -138,7 +138,7 @@ elseif(APPLE)
     )
 endif()
 
-if (NOT EMSCRIPTEN)
+if (NOT EMSCRIPTEN OR DAWN_EMSCRIPTEN_NATIVE)
     list(APPEND private_headers
         "ExternalTextureParams.h"
         "WGPUDeviceCallbackInfos.h"

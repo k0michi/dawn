@@ -75,7 +75,7 @@ function(dawn_add_library name)
   endif ()
 
   # Skip targets that shouldn't be built with Emscripten.
-  if (EMSCRIPTEN AND NOT arg_ENABLE_EMSCRIPTEN)
+  if (EMSCRIPTEN AND NOT arg_ENABLE_EMSCRIPTEN AND NOT DAWN_EMSCRIPTEN_NATIVE)
     return()
   endif ()
 

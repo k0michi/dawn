@@ -86,7 +86,11 @@ set(BUILD_SAMPLES OFF)
 set(BUILD_TESTS OFF)
 set(TARGET_MACOS OFF)
 set(FORCE_SYSTEM_COMPONENT_LOAD OFF)
-if (EMSCRIPTEN)
+option(DAWN_EMSCRIPTEN_NATIVE "Build dawn::native for Emscripten" OFF)
+if (EMSCRIPTEN AND DAWN_EMSCRIPTEN_NATIVE)
+  set(ENABLE_NULL ON)
+  add_compile_definitions(DAWN_EMSCRIPTEN_NATIVE)
+elseif (EMSCRIPTEN)
   # Only the samples are supported for Emscripten at the moment.
   # TODO(crbug.com/42240181): Make dawn_end2end_tests work too.
   set(BUILD_SAMPLES ON)

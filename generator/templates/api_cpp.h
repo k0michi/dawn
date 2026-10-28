@@ -31,7 +31,7 @@
 {% set CAPI = metadata.c_prefix %}
 
 {% if 'dawn' in enabled_tags %}
-    #ifdef __EMSCRIPTEN__
+    #if defined(__EMSCRIPTEN__) && !defined(DAWN_EMSCRIPTEN_NATIVE)
     #error "Do not include this header. Use the headers provided by Emdawnwebgpu instead."
     #endif
 {% endif %}
