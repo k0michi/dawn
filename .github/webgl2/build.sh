@@ -3,7 +3,10 @@
 set -eu
 
 # Builds dawn::native for Emscripten with the OpenGL ES backend on WebGL 2, as
-# the static library <build>/src/dawn/native/libwebgpu_dawn.a.
+# the static library <build>/src/dawn/native/libwebgpu_dawn.a, and dawn_proc
+# (<build>/src/dawn/libdawn_proc.a), whose wgpu* functions call through a table
+# that can point at dawn::native or another WebGPU implementation. Both carry
+# the commit they are built from, which must match.
 #
 # Usage: .github/webgl2/build.sh <build directory>
 #
@@ -40,4 +43,4 @@ emcmake cmake -G Ninja -S "$source" -B "$build" \
     -DTINT_BUILD_GLSL_VALIDATOR=OFF \
     -DTINT_BUILD_NULL_WRITER=ON \
     -DTINT_BUILD_IR_BINARY=OFF
-ninja -C "$build" webgpu_dawn
+ninja -C "$build" webgpu_dawn dawn_proc
