@@ -1,7 +1,8 @@
 // Checks multisampled rendering on WebGL 2, which has multisampled
 // renderbuffers but no multisampled textures: drawing with 4 samples and
 // resolving, keeping a multisampled attachment's contents between passes, and
-// rejecting uses that need a multisampled texture.
+// rejecting multisampled textures for shaders. Copy usages are allowed, as in
+// compatibility mode, which rejects the copies themselves.
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -88,8 +89,10 @@ void ReadBack(const char* name,
 void TestDrawAndResolve(bool withDepth) {
     const char* name = withDepth ? "draw with 4 samples and a depth attachment, then resolve"
                                  : "draw with 4 samples, then resolve";
-    wgpu::Texture multisampled = MakeTexture(wgpu::TextureFormat::RGBA8Unorm, 4,
-                                             wgpu::TextureUsage::RenderAttachment);
+    // Copy usages don't change how the texture is stored.
+    wgpu::Texture multisampled = MakeTexture(
+        wgpu::TextureFormat::RGBA8Unorm, 4,
+        wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc);
     wgpu::Texture resolved =
         MakeTexture(wgpu::TextureFormat::RGBA8Unorm, 1,
                     wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc);
@@ -189,16 +192,29 @@ int main() {
     TestDrawAndResolve(false);
     TestDrawAndResolve(true);
     TestLoadBetweenPasses();
-    // WebGL 2 shaders can't read multisampled textures, and blits can't write them.
+    // WebGL 2 shaders can't read multisampled textures.
     CheckRejected("a multisampled texture for shaders is rejected", ValidationErrorOf([] {
                       MakeTexture(wgpu::TextureFormat::RGBA8Unorm, 4,
                                   wgpu::TextureUsage::RenderAttachment |
                                       wgpu::TextureUsage::TextureBinding);
                   }));
-    CheckRejected("a multisampled texture to copy is rejected", ValidationErrorOf([] {
-                      MakeTexture(wgpu::TextureFormat::RGBA8Unorm, 4,
-                                  wgpu::TextureUsage::RenderAttachment |
-                                      wgpu::TextureUsage::CopySrc);
+    // As in compatibility mode elsewhere, copy usages are allowed and copies rejected.
+    const auto kCopyUsages = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc |
+                             wgpu::TextureUsage::CopyDst;
+    wgpu::Texture source;
+    wgpu::Texture destination;
+    std::string error = ValidationErrorOf([&] {
+        source = MakeTexture(wgpu::TextureFormat::RGBA8Unorm, 4, kCopyUsages);
+        destination = MakeTexture(wgpu::TextureFormat::RGBA8Unorm, 4, kCopyUsages);
+    });
+    Check("a multisampled texture with copy usages is accepted", error.empty(), error);
+    CheckRejected("copying a multisampled texture is rejected", ValidationErrorOf([&] {
+                      wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+                      wgpu::TexelCopyTextureInfo from{.texture = source};
+                      wgpu::TexelCopyTextureInfo to{.texture = destination};
+                      wgpu::Extent3D size{kSize, kSize};
+                      encoder.CopyTextureToTexture(&from, &to, &size);
+                      encoder.Finish();
                   }));
     FinishWhen([] { return pending == 0; });
     return 0;
