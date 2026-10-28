@@ -1182,11 +1182,29 @@ class Printer : public tint::TextGenerator {
         const auto& bp = var->BindingPoint();
         TINT_IR_ASSERT(ir_, bp.has_value());
 
+        auto* ptr = var->Result()->Type()->As<core::type::Pointer>();
+        if (!HasLayoutBinding()) {
+            // GLSL ES 3.00 has no binding qualifier. The block name ends in the binding instead,
+            // for the embedder to pass to glUniformBlockBinding.
+            Line() << "layout(std140)";
+            EmitVarStruct("uniform", NameOf(var->Result()),
+                          "ubo_binding" + std::to_string(bp->binding),
+                          ptr->UnwrapPtr()->As<core::type::Struct>());
+            return;
+        }
+
         EmitLayoutBinding(Line(), bp.value(), std::nullopt, {LayoutFormat::kStd140});
 
-        auto* ptr = var->Result()->Type()->As<core::type::Pointer>();
         EmitVarStruct("uniform", NameOf(var->Result()), "ubo",
                       ptr->UnwrapPtr()->As<core::type::Struct>());
+    }
+
+    /// @returns true if the GLSL version has the binding qualifier and locations on interstage
+    /// variables, which GLSL ES 3.00 lacks.
+    bool HasLayoutBinding() const {
+        const auto& version = options_.version;
+        return !version.IsES() || version.major_version > 3 ||
+               (version.major_version == 3 && version.minor_version >= 1);
     }
 
     void EmitWorkgroupVar(core::ir::Var* var) {
@@ -1266,20 +1284,27 @@ class Printer : public tint::TextGenerator {
             // are correct at the point of use.
             names_.Add(var->Result(), GLSLBuiltinToString(*attrs.builtin, addrspace));
             return;
-        } else if (attrs.location) {
+        }
+        bool is_interstage = false;
+        if (attrs.location) {
             // Use a fixed naming scheme for interstage variables so that they match between vertex
             // and fragment shaders.
             if ((stage_ == core::ir::Function::PipelineStage::kVertex &&
                  addrspace == core::AddressSpace::kOut) ||
                 (stage_ == core::ir::Function::PipelineStage::kFragment &&
                  addrspace == core::AddressSpace::kIn)) {
+                is_interstage = true;
                 names_.Add(var->Result(),
                            "tint_interstage_location" + std::to_string(attrs.location.value()));
             }
         }
 
         auto out = Line();
-        EmitLayoutLocation(out, attrs.location, attrs.blend_src);
+        // GLSL ES 3.00 only allows locations on vertex inputs and fragment outputs. Interstage
+        // variables are matched by their fixed names instead.
+        if (!is_interstage || HasLayoutBinding()) {
+            EmitLayoutLocation(out, attrs.location, attrs.blend_src);
+        }
         if (attrs.interpolation.has_value()) {
             EmitInterpolation(out, attrs.interpolation.value());
         }
