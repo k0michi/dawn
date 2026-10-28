@@ -915,18 +915,16 @@ MaybeValError ValidateTextureDescriptor(
     DAWN_TRY(ValidateSampleCount(*descriptor, usage, format));
 
 #if defined(__EMSCRIPTEN__)
-    // WebGL 2 has multisampled renderbuffers but no multisampled textures: shaders can't read
-    // multisampled data and blits can't write it, so the OpenGL ES backend can only render to
-    // multisampled textures and resolve them.
+    // WebGL 2 has multisampled renderbuffers but no multisampled textures, so the OpenGL ES
+    // backend can render to multisampled textures and resolve them, but shaders can't read them.
+    // Copying them is already invalid in compatibility mode.
     if (descriptor->sampleCount > 1 &&
         device->GetAdapter()->GetPhysicalDevice()->GetBackendType() ==
             wgpu::BackendType::OpenGLES) {
-        constexpr wgpu::TextureUsage kAttachmentUsages =
-            wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TransientAttachment;
-        DAWN_INVALID_IF(usage & ~kAttachmentUsages,
+        DAWN_INVALID_IF(usage & wgpu::TextureUsage::TextureBinding,
                         "The usage (%s) of a multisampled texture includes %s, which WebGL 2 does "
                         "not allow.",
-                        usage, usage & ~kAttachmentUsages);
+                        usage, wgpu::TextureUsage::TextureBinding);
     }
 #endif
 
