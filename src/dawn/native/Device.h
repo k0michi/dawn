@@ -506,6 +506,12 @@ class DeviceBase : public ErrorSink,
         std::unique_ptr<UnknownError> err,
         InternalErrorType additionalAllowedErrors = InternalErrorType::None) override;
 
+#if defined(__EMSCRIPTEN__)
+    // Ticks the device in a later task, and again while it has work in flight. Browsers call
+    // WebGPU callbacks that allow spontaneous calls without the program processing events.
+    void ScheduleTick();
+#endif
+
   protected:
     void ForceEnableFeatureForTesting(Feature feature);
 
@@ -525,6 +531,9 @@ class DeviceBase : public ErrorSink,
     std::pair<std::string, bool> GetTraceInfo();
 
   private:
+#if defined(__EMSCRIPTEN__)
+    bool mTickScheduled = false;
+#endif
     void WillDropLastExternalRef() override;
 
     virtual ResultOrError<Ref<BindGroupBase>> CreateBindGroupImpl(

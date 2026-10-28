@@ -31,9 +31,14 @@
 
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/eventloop.h>
+#endif
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/str_format.h"
@@ -1573,6 +1578,25 @@ TextureBase* DeviceBase::APICreateErrorTexture(const TextureDescriptor* desc) {
 }
 
 // Other Device API methods
+
+#if defined(__EMSCRIPTEN__)
+void DeviceBase::ScheduleTick() {
+    if (mTickScheduled) {
+        return;
+    }
+    mTickScheduled = true;
+    // Tick in a later task: WebGL only signals fences between tasks.
+    emscripten_set_timeout(
+        [](void* data) {
+            std::unique_ptr<Ref<DeviceBase>> device(static_cast<Ref<DeviceBase>*>(data));
+            (*device)->mTickScheduled = false;
+            if ((*device)->APITick()) {
+                (*device)->ScheduleTick();
+            }
+        },
+        0, new Ref<DeviceBase>(this));
+}
+#endif  // defined(__EMSCRIPTEN__)
 
 // Returns true if future ticking is needed.
 bool DeviceBase::APITick() {

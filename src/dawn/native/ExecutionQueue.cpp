@@ -260,7 +260,13 @@ void ExecutionQueueBase::TrackSerialTask(QueuePriority priority,
     });
     if (!tracked) {
         task();
+        return;
     }
+#if defined(__EMSCRIPTEN__)
+    // Run the task when the serial completes even if the program never ticks or processes
+    // events, so that the callbacks it completes are called as in browsers.
+    GetDevice()->ScheduleTick();
+#endif
 }
 
 void ExecutionQueueBase::UpdateCompletedSerialTo(QueuePriority priority,
