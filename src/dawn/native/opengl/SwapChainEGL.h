@@ -53,6 +53,9 @@ class SwapChainEGL final : public SwapChainBase {
     MaybeError Initialize(SwapChainBase* previousSwapChain);
 
     MaybeError CreateEGLSurface(const DisplayEGL* display);
+#if defined(__EMSCRIPTEN__)
+    void SchedulePresent();
+#endif
 
     EGLSurface mEGLSurface = EGL_NO_SURFACE;
     Ref<Texture> mTexture;

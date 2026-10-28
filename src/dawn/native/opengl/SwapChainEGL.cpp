@@ -27,7 +27,12 @@
 
 #include "src/dawn/native/opengl/SwapChainEGL.h"
 
+#include <memory>
 #include <utility>
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/eventloop.h>
+#endif
 
 #include "src/dawn/native/Surface.h"
 #include "src/dawn/native/opengl/ContextEGL.h"
@@ -122,6 +127,11 @@ MaybeError SwapChainEGL::PresentImpl() {
 
         DAWN_GL_TRY(gl, BindFramebuffer(GL_DRAW_FRAMEBUFFER, 0));
         DAWN_GL_TRY(gl, Scissor(0, 0, surfaceWidth, surfaceHeight));
+#if defined(__EMSCRIPTEN__)
+        // Chrome only counts a draw or a clear as drawing to the canvas, not a blit: without the
+        // clear, the blit is lost when Chrome clears the presented drawing buffer.
+        DAWN_GL_TRY(gl, Clear(GL_COLOR_BUFFER_BIT));
+#endif
         DAWN_GL_TRY(gl, BlitFramebuffer(0, 0, mTexture->GetWidth(Aspect::Color),
                                         mTexture->GetHeight(Aspect::Color), 0, surfaceHeight,
                                         surfaceWidth, 0, GL_COLOR_BUFFER_BIT, GL_LINEAR));
@@ -147,6 +157,9 @@ ResultOrError<SwapChainTextureInfo> SwapChainEGL::GetCurrentTextureImpl() {
 
     mTexture = std::move(ToBackend(texture));
     mTextureView = std::move(ToBackend(view));
+#if defined(__EMSCRIPTEN__)
+    SchedulePresent();
+#endif
 
     SwapChainTextureInfo info;
     info.texture = mTexture;
@@ -154,6 +167,26 @@ ResultOrError<SwapChainTextureInfo> SwapChainEGL::GetCurrentTextureImpl() {
     info.status = wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal;
     return info;
 }
+
+#if defined(__EMSCRIPTEN__)
+void SwapChainEGL::SchedulePresent() {
+    // Programs written for Emdawnwebgpu never call wgpuSurfacePresent: the browser shows the
+    // canvas when control returns to it. Present the same way, in a task after the one that got
+    // the texture, unless the program has presented by then. The canvas then shows the frame
+    // one browser frame later than with Emdawnwebgpu.
+    auto* swapChain = new Ref<SwapChainEGL>(this);
+    emscripten_set_timeout(
+        [](void* data) {
+            std::unique_ptr<Ref<SwapChainEGL>> swapChain(static_cast<Ref<SwapChainEGL>*>(data));
+            // The texture is gone once presented, or when the swap chain is detached.
+            if ((*swapChain)->mTexture == nullptr) {
+                return;
+            }
+            (*swapChain)->GetSurface()->APIPresent();
+        },
+        0, swapChain);
+}
+#endif  // defined(__EMSCRIPTEN__)
 
 void SwapChainEGL::DetachFromSurfaceImpl() {
     if (mEGLSurface != EGL_NO_SURFACE) {
