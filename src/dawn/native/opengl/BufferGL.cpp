@@ -38,6 +38,11 @@
 #include "src/utils/compiler.h"
 #include "src/utils/numeric.h"
 
+#if defined(__EMSCRIPTEN__)
+// WebGL 2's getBufferSubData. ES 3.0 has no such function, so it is not in OpenGLFunctions.
+extern "C" void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void* data);
+#endif
+
 namespace dawn::native::opengl {
 
 // Buffer
@@ -125,6 +130,20 @@ GLenum Buffer::GetDataTarget() const {
 #endif
     return GL_ARRAY_BUFFER;
 }
+
+#if defined(__EMSCRIPTEN__)
+MaybeError Buffer::ReadData(const OpenGLFunctions& gl,
+                            uint64_t offset,
+                            uint64_t size,
+                            void* data) {
+    // COPY_READ_BUFFER takes index buffers and other buffers alike, and is not vertex array state.
+    DAWN_GL_TRY(gl, BindBuffer(GL_COPY_READ_BUFFER, mBuffer));
+    glGetBufferSubData(GL_COPY_READ_BUFFER, checked_cast<GLintptr>(offset),
+                       checked_cast<GLsizeiptr>(size), data);
+    DAWN_GL_TRY(gl, BindBuffer(GL_COPY_READ_BUFFER, 0));
+    return {};
+}
+#endif
 
 MaybeError Buffer::EnsureDataInitialized(bool* outDidDataInitialization) {
     if (!NeedsInitialization()) {

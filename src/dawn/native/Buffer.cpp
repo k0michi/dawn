@@ -471,6 +471,22 @@ ResultOrValError<UnpackedPtr<BufferDescriptor>> ValidateBufferDescriptor(
 
     DAWN_TRY(ValidateBufferUsageCombinations(device, usage));
 
+#if defined(__EMSCRIPTEN__)
+    // WebGL fixes a buffer to index data or to other data the first time it is bound, so the
+    // OpenGL ES backend on WebGL 2 cannot make a buffer that is both an index buffer and a vertex,
+    // uniform, storage or indirect buffer.
+    if (device->GetAdapter()->GetPhysicalDevice()->GetBackendType() ==
+        wgpu::BackendType::OpenGLES) {
+        constexpr wgpu::BufferUsage kNonIndexUsages =
+            wgpu::BufferUsage::Vertex | wgpu::BufferUsage::Uniform | wgpu::BufferUsage::Storage |
+            wgpu::BufferUsage::Indirect | wgpu::BufferUsage::QueryResolve;
+        DAWN_INVALID_IF(
+            (usage & wgpu::BufferUsage::Index) && (usage & kNonIndexUsages),
+            "Buffer usage (%s) combines Index with %s, which WebGL 2 does not allow.", usage,
+            usage & kNonIndexUsages);
+    }
+#endif
+
     DAWN_INVALID_IF(descriptor->mappedAtCreation && descriptor->size % 4 != 0,
                     "Buffer is mapped at creation but its size (%u) is not a multiple of 4.",
                     descriptor->size);

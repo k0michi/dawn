@@ -37,6 +37,7 @@
 namespace dawn::native::opengl {
 
 class Device;
+struct OpenGLFunctions;
 
 class Buffer final : public BufferBase {
   public:
@@ -51,6 +52,12 @@ class Buffer final : public BufferBase {
     // a buffer used for indices be bound to other targets, so index buffers use
     // GL_ELEMENT_ARRAY_BUFFER, and other buffers GL_ARRAY_BUFFER.
     GLenum GetDataTarget() const;
+
+#if defined(__EMSCRIPTEN__)
+    // Reads |size| bytes at |offset| into |data| with WebGL 2's getBufferSubData, which waits for
+    // the GPU.
+    MaybeError ReadData(const OpenGLFunctions& gl, uint64_t offset, uint64_t size, void* data);
+#endif
 
     MaybeError EnsureDataInitialized(bool* outDidDataInitialization = nullptr);
     MaybeError EnsureDataInitializedAsDestination(uint64_t offset,

@@ -852,6 +852,36 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                     ToBackend(copy->destination)
                         ->EnsureDataInitializedAsDestination(copy->destinationOffset, copy->size));
 
+#if defined(__EMSCRIPTEN__)
+                // WebGL only lets index buffers be bound to the COPY_* targets, and cannot copy
+                // between an index buffer and another buffer on the GPU, so those copies go
+                // through the CPU.
+                if (ToBackend(copy->source)->GetDataTarget() !=
+                    ToBackend(copy->destination)->GetDataTarget()) {
+                    std::vector<uint8_t> data(checked_cast<size_t>(copy->size));
+                    DAWN_TRY(ToBackend(copy->source)
+                                 ->ReadData(gl, copy->sourceOffset, copy->size, data.data()));
+                    DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER,
+                                               ToBackend(copy->destination)->GetHandle()));
+                    DAWN_GL_TRY(gl, BufferSubData(GL_COPY_WRITE_BUFFER,
+                                                  checked_cast<GLintptr>(copy->destinationOffset),
+                                                  checked_cast<GLsizeiptr>(copy->size),
+                                                  data.data()));
+                    DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER, 0));
+                } else {
+                    DAWN_GL_TRY(gl, BindBuffer(GL_COPY_READ_BUFFER,
+                                               ToBackend(copy->source)->GetHandle()));
+                    DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER,
+                                               ToBackend(copy->destination)->GetHandle()));
+                    DAWN_GL_TRY(gl,
+                                CopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
+                                                  checked_cast<GLintptr>(copy->sourceOffset),
+                                                  checked_cast<GLintptr>(copy->destinationOffset),
+                                                  checked_cast<GLsizeiptr>(copy->size)));
+                    DAWN_GL_TRY(gl, BindBuffer(GL_COPY_READ_BUFFER, 0));
+                    DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER, 0));
+                }
+#else
                 DAWN_GL_TRY(gl,
                             BindBuffer(GL_PIXEL_PACK_BUFFER, ToBackend(copy->source)->GetHandle()));
                 DAWN_GL_TRY(gl, BindBuffer(GL_PIXEL_UNPACK_BUFFER,
@@ -863,6 +893,7 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
 
                 DAWN_GL_TRY(gl, BindBuffer(GL_PIXEL_PACK_BUFFER, 0));
                 DAWN_GL_TRY(gl, BindBuffer(GL_PIXEL_UNPACK_BUFFER, 0));
+#endif
 
                 ToBackend(copy->source)->TrackUsage();
                 ToBackend(copy->destination)->TrackUsage();
