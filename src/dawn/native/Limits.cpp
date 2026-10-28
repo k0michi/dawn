@@ -210,6 +210,16 @@ CombinedLimits ReifyDefaultLimits(const CombinedLimits& limits, wgpu::FeatureLev
     return out;
 }
 
+void ClampLimits(CombinedLimits* limits, const CombinedLimits& supported) {
+#define X(Scope, Class, limitName, ...)                                             \
+    if (detail::CheckLimit<detail::LimitClass::Class>::IsBetter(limits->Scope.limitName, \
+                                                                supported.Scope.limitName)) { \
+        limits->Scope.limitName = supported.Scope.limitName;                       \
+    }
+    LIMITS(X)
+#undef X
+}
+
 MaybeValError ValidateAndUnpackLimitsIn(
     const Limits* chainedLimits,
     const std::unordered_set<wgpu::FeatureName>& supportedFeatures,

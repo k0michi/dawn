@@ -115,6 +115,10 @@ void GetDefaultLimits(CombinedLimits* limits, wgpu::FeatureLevel featureLevel);
 // are worse.
 CombinedLimits ReifyDefaultLimits(const CombinedLimits& limits, wgpu::FeatureLevel featureLevel);
 
+// Lowers every limit in |limits| that is better than the one in |supported| to it. For adapters
+// whose limits are below the defaults of their feature level, like WebGL 2's.
+void ClampLimits(CombinedLimits* limits, const CombinedLimits& supported);
+
 // Fixup limits after device creation
 void EnforceLimitSpecInvariants(CombinedLimits* limits, wgpu::FeatureLevel featureLevel);
 

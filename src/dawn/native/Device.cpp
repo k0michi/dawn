@@ -341,6 +341,13 @@ DeviceBase::DeviceBase(AdapterBase* adapter,
         GetDefaultLimits(&mLimits, effectiveFeatureLevel);
     }
 
+#if defined(__EMSCRIPTEN__)
+    // WebGL 2 is below the compatibility feature level: it has no storage buffers, storage
+    // textures or compute, and caps vertex strides at 255. The defaults would claim more than the
+    // adapter has, so the device gets the adapter's limits where those are lower.
+    ClampLimits(&mLimits, GetAdapter()->GetLimits());
+#endif
+
     // Get texelCopyBufferRowAlignmentLimits from physical device
     mLimits.texelCopyBufferRowAlignmentLimits =
         GetPhysicalDevice()->GetLimits().texelCopyBufferRowAlignmentLimits;
