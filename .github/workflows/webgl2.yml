@@ -1,8 +1,9 @@
 name: WebGL 2
 
 # Builds dawn::native for Emscripten with the OpenGL ES backend on WebGL 2, and
-# checks that a demo draws in headless Chromium on SwiftShader. The scripts are
-# in .github/webgl2. The other workflows here come from upstream Dawn.
+# in headless Chromium on SwiftShader checks that a demo draws and that the
+# device reports and enforces what WebGL 2 can do. The scripts are in
+# .github/webgl2. The other workflows here come from upstream Dawn.
 
 on:
   push:
@@ -62,9 +63,11 @@ jobs:
           .github/webgl2/build.sh "$RUNNER_TEMP/build"
           ccache --show-stats
 
-      - name: Link the demo
+      - name: Link the demo and tests
         shell: bash
-        run: .github/webgl2/link-demo.sh "$RUNNER_TEMP/build" "$RUNNER_TEMP/demo"
+        run: |
+          .github/webgl2/link.sh demo "$RUNNER_TEMP/build" "$RUNNER_TEMP/demo"
+          .github/webgl2/link.sh capability-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/capability-test"
 
       - name: Install Playwright
         shell: bash
@@ -75,6 +78,11 @@ jobs:
       - name: Smoke test
         shell: bash
         run: node .github/webgl2/smoke-test.mjs "$RUNNER_TEMP/demo" "$RUNNER_TEMP/demo/screenshot.png"
+
+      - name: Capability tests
+        if: success() || failure()
+        shell: bash
+        run: node .github/webgl2/run-tests.mjs "$RUNNER_TEMP/capability-test"
 
       - name: Upload the demo
         if: always()

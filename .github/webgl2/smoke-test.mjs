@@ -1,4 +1,4 @@
-// Opens the demo from link-demo.sh in headless Chromium, on SwiftShader so that
+// Opens the demo from link.sh in headless Chromium, on SwiftShader so that
 // it needs no GPU, and checks that it draws: the clear color in a corner, and
 // the checkerboard's top-left square white and bottom-left square black.
 //
