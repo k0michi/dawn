@@ -357,6 +357,16 @@ bool Texture::IsRenderbuffer() const {
            GetFormat().HasDepthOrStencil();
 }
 
+#if defined(__EMSCRIPTEN__)
+SwapChainEGL* Texture::GetSwapChain() const {
+    return mSwapChain;
+}
+
+void Texture::SetSwapChain(SwapChainEGL* swapChain) {
+    mSwapChain = swapChain;
+}
+#endif
+
 void Texture::DestroyImpl(DestroyReason reason) {
     TextureBase::DestroyImpl(reason);
     if (mOwnsHandle == OwnsHandle::Yes) {

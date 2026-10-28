@@ -31,9 +31,12 @@
 #include "src/dawn/native/Texture.h"
 #include "src/dawn/native/opengl/opengl_platform.h"
 
+#include "partition_alloc/pointers/raw_ptr.h"
+
 namespace dawn::native::opengl {
 
 class Device;
+class SwapChainEGL;
 struct GLFormat;
 struct OpenGLFunctions;
 class SharedTextureMemory;
@@ -67,6 +70,12 @@ class Texture final : public TextureBase {
     MaybeError SynchronizeTextureBeforeUse();
     bool IsRenderbuffer() const;
 
+#if defined(__EMSCRIPTEN__)
+    // The swap chain whose current texture this is, if any.
+    SwapChainEGL* GetSwapChain() const;
+    void SetSwapChain(SwapChainEGL* swapChain);
+#endif
+
   private:
     ~Texture() override;
 
@@ -78,6 +87,9 @@ class Texture final : public TextureBase {
     GLuint mTextureHandle;
     GLuint mRenderbufferHandle;
     OwnsHandle mOwnsHandle = OwnsHandle::No;
+#if defined(__EMSCRIPTEN__)
+    raw_ptr<SwapChainEGL> mSwapChain = nullptr;
+#endif
     GLenum mTarget;
 };
 

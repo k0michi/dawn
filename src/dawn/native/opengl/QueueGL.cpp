@@ -27,6 +27,7 @@
 
 #include "src/dawn/native/opengl/QueueGL.h"
 
+#include <algorithm>
 #include <vector>
 
 #include "dawn/platform/DawnPlatform.h"
@@ -39,6 +40,7 @@
 #include "src/dawn/native/opengl/EGLFunctions.h"
 #include "src/dawn/native/opengl/PhysicalDeviceGL.h"
 #include "src/dawn/native/opengl/SharedFenceEGL.h"
+#include "src/dawn/native/opengl/SwapChainEGL.h"
 #include "src/dawn/native/opengl/TextureGL.h"
 #include "src/dawn/native/opengl/UtilsGL.h"
 #include "src/dawn/platform/tracing/TraceEvent.h"
@@ -79,6 +81,42 @@ Queue::Queue(Device* device, const QueueDescriptor* descriptor) : QueueBase(devi
     }
 }
 
+#if defined(__EMSCRIPTEN__)
+namespace {
+
+// The browser shows the canvas when control returns to it, and programs written for
+// Emdawnwebgpu never present. Copy the surface textures that |commands| use to their canvases
+// right after the commands, so that the canvas shows them at the end of this task.
+MaybeError BlitSurfaceTexturesToCanvas(const OpenGLFunctions& gl,
+                                       Span<CommandBufferBase* const> commands) {
+    std::vector<SwapChainEGL*> swapChains;
+    auto add = [&](TextureBase* texture) {
+        SwapChainEGL* swapChain = ToBackend(texture)->GetSwapChain();
+        if (swapChain != nullptr &&
+            std::find(swapChains.begin(), swapChains.end(), swapChain) == swapChains.end()) {
+            swapChains.push_back(swapChain);
+        }
+    };
+    for (CommandBufferBase* commandBuffer : commands) {
+        const CommandBufferResourceUsage& usages = commandBuffer->GetResourceUsages();
+        for (const RenderPassResourceUsage& pass : usages.renderPasses) {
+            for (TextureBase* texture : pass.textures) {
+                add(texture);
+            }
+        }
+        for (TextureBase* texture : usages.topLevelTextures) {
+            add(texture);
+        }
+    }
+    for (SwapChainEGL* swapChain : swapChains) {
+        DAWN_TRY(swapChain->BlitToCanvas(gl));
+    }
+    return {};
+}
+
+}  // namespace
+#endif  // defined(__EMSCRIPTEN__)
+
 MaybeError Queue::SubmitImpl(Span<CommandBufferBase* const> commands) {
     Device* device = ToBackend(GetDevice());
     return device->EnqueueAndFlushGL([commands](const OpenGLFunctions& gl) -> MaybeError {
@@ -88,6 +126,9 @@ MaybeError Queue::SubmitImpl(Span<CommandBufferBase* const> commands) {
                 DAWN_TRY(ToBackend(commandBuffer)->RecordCommands(gl));
             }
         }
+#if defined(__EMSCRIPTEN__)
+        DAWN_TRY(BlitSurfaceTexturesToCanvas(gl, commands));
+#endif
         // Results of the submitted work can become visible to the application (e.g. on present).
         DAWN_TRY(
             CheckPendingErrorBeforeUserVisibleData(gl, "Unchecked OpenGL calls in Queue::Submit"));

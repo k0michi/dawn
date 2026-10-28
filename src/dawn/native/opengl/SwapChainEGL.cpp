@@ -107,8 +107,12 @@ MaybeError SwapChainEGL::PresentImpl() {
     EGLDisplay display = device->GetEGLDisplay();
     const EGLFunctions& egl = device->GetEGL(false);
 
-    // Do the reverse-Y blit from the fake surface texture to the default framebuffer.
-    {
+#if defined(__EMSCRIPTEN__)
+    bool needsBlit = !mOnCanvas;
+#else
+    bool needsBlit = true;
+#endif
+    if (needsBlit) {
         auto surfaceCurrent = device->GetContext()->SetCurrentSurfaceScope(mEGLSurface);
         EGLint surfaceWidth;
         EGLint surfaceHeight;
@@ -116,34 +120,42 @@ MaybeError SwapChainEGL::PresentImpl() {
                           "getting surface width"));
         DAWN_TRY(CheckEGL(egl, egl.QuerySurface(display, mEGLSurface, EGL_HEIGHT, &surfaceHeight),
                           "getting surface height"));
-
-        const OpenGLFunctions& gl = device->GetGL();
-
-        GLuint readFbo = 0;
-        DAWN_GL_TRY(gl, GenFramebuffers(1, &readFbo));
-        DAWN_GL_TRY(gl, BindFramebuffer(GL_READ_FRAMEBUFFER, readFbo));
-        DAWN_TRY(mTextureView->BindToFramebuffer(gl, GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0));
-        DAWN_TRY(CheckFramebufferComplete(gl, GL_READ_FRAMEBUFFER));
-
-        DAWN_GL_TRY(gl, BindFramebuffer(GL_DRAW_FRAMEBUFFER, 0));
-        DAWN_GL_TRY(gl, Scissor(0, 0, surfaceWidth, surfaceHeight));
-#if defined(__EMSCRIPTEN__)
-        // Chrome only counts a draw or a clear as drawing to the canvas, not a blit: without the
-        // clear, the blit is lost when Chrome clears the presented drawing buffer.
-        DAWN_GL_TRY(gl, Clear(GL_COLOR_BUFFER_BIT));
-#endif
-        DAWN_GL_TRY(gl, BlitFramebuffer(0, 0, mTexture->GetWidth(Aspect::Color),
-                                        mTexture->GetHeight(Aspect::Color), 0, surfaceHeight,
-                                        surfaceWidth, 0, GL_COLOR_BUFFER_BIT, GL_LINEAR));
-
-        DAWN_GL_TRY(gl, DeleteFramebuffers(1, &readFbo));
+        DAWN_TRY(BlitToDefaultFramebuffer(device->GetGL(), surfaceWidth, surfaceHeight));
     }
 
     egl.SwapBuffers(display, mEGLSurface);
 
+#if defined(__EMSCRIPTEN__)
+    mTexture->SetSwapChain(nullptr);
+#endif
     mTexture->APIDestroy();
     mTexture = nullptr;
 
+    return {};
+}
+
+MaybeError SwapChainEGL::BlitToDefaultFramebuffer(const OpenGLFunctions& gl,
+                                                  EGLint surfaceWidth,
+                                                  EGLint surfaceHeight) {
+    // Do the reverse-Y blit from the fake surface texture to the default framebuffer.
+    GLuint readFbo = 0;
+    DAWN_GL_TRY(gl, GenFramebuffers(1, &readFbo));
+    DAWN_GL_TRY(gl, BindFramebuffer(GL_READ_FRAMEBUFFER, readFbo));
+    DAWN_TRY(mTextureView->BindToFramebuffer(gl, GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0));
+    DAWN_TRY(CheckFramebufferComplete(gl, GL_READ_FRAMEBUFFER));
+
+    DAWN_GL_TRY(gl, BindFramebuffer(GL_DRAW_FRAMEBUFFER, 0));
+    DAWN_GL_TRY(gl, Scissor(0, 0, surfaceWidth, surfaceHeight));
+#if defined(__EMSCRIPTEN__)
+    // Chrome only counts a draw or a clear as drawing to the canvas, not a blit: without the
+    // clear, the blit is lost when Chrome clears the presented drawing buffer.
+    DAWN_GL_TRY(gl, Clear(GL_COLOR_BUFFER_BIT));
+#endif
+    DAWN_GL_TRY(gl, BlitFramebuffer(0, 0, mTexture->GetWidth(Aspect::Color),
+                                    mTexture->GetHeight(Aspect::Color), 0, surfaceHeight,
+                                    surfaceWidth, 0, GL_COLOR_BUFFER_BIT, GL_LINEAR));
+
+    DAWN_GL_TRY(gl, DeleteFramebuffers(1, &readFbo));
     return {};
 }
 
@@ -158,7 +170,9 @@ ResultOrError<SwapChainTextureInfo> SwapChainEGL::GetCurrentTextureImpl() {
     mTexture = std::move(ToBackend(texture));
     mTextureView = std::move(ToBackend(view));
 #if defined(__EMSCRIPTEN__)
-    SchedulePresent();
+    mTexture->SetSwapChain(this);
+    mOnCanvas = false;
+    ScheduleRelease();
 #endif
 
     SwapChainTextureInfo info;
@@ -169,11 +183,28 @@ ResultOrError<SwapChainTextureInfo> SwapChainEGL::GetCurrentTextureImpl() {
 }
 
 #if defined(__EMSCRIPTEN__)
-void SwapChainEGL::SchedulePresent() {
-    // Programs written for Emdawnwebgpu never call wgpuSurfacePresent: the browser shows the
-    // canvas when control returns to it. Present the same way, in a task after the one that got
-    // the texture, unless the program has presented by then. The canvas then shows the frame
-    // one browser frame later than with Emdawnwebgpu.
+MaybeError SwapChainEGL::BlitToCanvas(const OpenGLFunctions& gl) {
+    // On WebGL the default framebuffer is the context's canvas whatever the surface is, so the
+    // surface doesn't need to be current.
+    Device* device = ToBackend(GetDevice());
+    const EGLFunctions& egl = device->GetEGL(false);
+    EGLint surfaceWidth;
+    EGLint surfaceHeight;
+    DAWN_TRY(CheckEGL(
+        egl, egl.QuerySurface(device->GetEGLDisplay(), mEGLSurface, EGL_WIDTH, &surfaceWidth),
+        "getting surface width"));
+    DAWN_TRY(CheckEGL(
+        egl, egl.QuerySurface(device->GetEGLDisplay(), mEGLSurface, EGL_HEIGHT, &surfaceHeight),
+        "getting surface height"));
+    DAWN_TRY(BlitToDefaultFramebuffer(gl, surfaceWidth, surfaceHeight));
+    mOnCanvas = true;
+    return {};
+}
+
+void SwapChainEGL::ScheduleRelease() {
+    // Programs written for Emdawnwebgpu never call wgpuSurfacePresent, and get a new texture
+    // in each browser frame. Submits already copy the texture to the canvas, so release it in
+    // a task after the one that got it, unless the program has presented by then.
     auto* swapChain = new Ref<SwapChainEGL>(this);
     emscripten_set_timeout(
         [](void* data) {
@@ -182,6 +213,9 @@ void SwapChainEGL::SchedulePresent() {
             if ((*swapChain)->mTexture == nullptr) {
                 return;
             }
+            // Don't copy the texture to the canvas again: the browser has shown the canvas and
+            // may have cleared it, and a texture nothing was submitted to has no frame to show.
+            (*swapChain)->mOnCanvas = true;
             (*swapChain)->GetSurface()->APIPresent();
         },
         0, swapChain);
@@ -196,6 +230,9 @@ void SwapChainEGL::DetachFromSurfaceImpl() {
     }
 
     if (mTexture != nullptr) {
+#if defined(__EMSCRIPTEN__)
+        mTexture->SetSwapChain(nullptr);
+#endif
         mTexture->APIDestroy();
         mTexture = nullptr;
         mTextureView = nullptr;

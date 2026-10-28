@@ -35,6 +35,7 @@ namespace dawn::native::opengl {
 
 class Device;
 class DisplayEGL;
+struct OpenGLFunctions;
 class Texture;
 class TextureView;
 
@@ -48,18 +49,31 @@ class SwapChainEGL final : public SwapChainBase {
     SwapChainEGL(DeviceBase* device, Surface* surface, const SurfaceConfiguration* config);
     ~SwapChainEGL() override;
 
+#if defined(__EMSCRIPTEN__)
+    // Copies the current texture to the canvas. Called when a submit writes to the texture: the
+    // browser shows the canvas when control returns to it, without a present.
+    MaybeError BlitToCanvas(const OpenGLFunctions& gl);
+#endif
+
   private:
     using SwapChainBase::SwapChainBase;
     MaybeError Initialize(SwapChainBase* previousSwapChain);
 
     MaybeError CreateEGLSurface(const DisplayEGL* display);
+    MaybeError BlitToDefaultFramebuffer(const OpenGLFunctions& gl,
+                                        EGLint surfaceWidth,
+                                        EGLint surfaceHeight);
 #if defined(__EMSCRIPTEN__)
-    void SchedulePresent();
+    void ScheduleRelease();
 #endif
 
     EGLSurface mEGLSurface = EGL_NO_SURFACE;
     Ref<Texture> mTexture;
     Ref<TextureView> mTextureView;
+#if defined(__EMSCRIPTEN__)
+    // Whether the canvas shows the current texture as last submitted.
+    bool mOnCanvas = false;
+#endif
 
     MaybeError PresentImpl() override;
     ResultOrError<SwapChainTextureInfo> GetCurrentTextureImpl() override;
