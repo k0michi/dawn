@@ -28,6 +28,7 @@
 #include "src/dawn/native/opengl/TextureToBufferTF.h"
 
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <string>
 #include <vector>
@@ -65,6 +66,8 @@ enum class Packing : uint32_t {
     Depth16,
     RG11B10Ufloat,
     RGB9E5Ufloat,
+    // Stencil values, read from two RGBA8 textures holding one bit per channel.
+    Stencil8,
 };
 
 struct Layout {
@@ -80,6 +83,16 @@ std::optional<Layout> GetLayout(wgpu::TextureFormat format, Aspect aspect) {
             case wgpu::TextureFormat::Depth32Float:
             case wgpu::TextureFormat::Depth32FloatStencil8:
                 return Layout{Packing::Float32, 4};
+            default:
+                return std::nullopt;
+        }
+    }
+    if (aspect == Aspect::Stencil) {
+        switch (format) {
+            case wgpu::TextureFormat::Stencil8:
+            case wgpu::TextureFormat::Depth24PlusStencil8:
+            case wgpu::TextureFormat::Depth32FloatStencil8:
+                return Layout{Packing::Stencil8, 1};
             default:
                 return std::nullopt;
         }
@@ -233,7 +246,6 @@ std::string VertexShader(Packing packing, uint32_t bytesPerTexel, GLenum target)
             value = "vec4";
             break;
     }
-    std::string sampler = prefix + SamplerType(target);
 
     // The texel's bytes as little-endian words, from its channels in `v`.
     std::string pack;
@@ -287,24 +299,40 @@ std::string VertexShader(Packing packing, uint32_t bytesPerTexel, GLenum target)
         case Packing::RGB9E5Ufloat:
             pack = "return uvec4(ToRGB9E5(v.rgb), 0u, 0u, 0u);\n";
             break;
+        case Packing::Stencil8:
+            break;
     }
 
-    std::string fetch = target == GL_TEXTURE_2D
-                            ? "texelFetch(src, origin.xy + ivec2(int(x), int(y)), 0)"
-                            : "texelFetch(src, origin + ivec3(int(x), int(y), int(z)), 0)";
+    std::string samplers;
+    std::string texelWords;
+    if (packing == Packing::Stencil8) {
+        samplers =
+            "uniform highp sampler2D lowBits;\n"
+            "uniform highp sampler2D highBits;\n";
+        texelWords =
+            "ivec2 coord = origin.xy + ivec2(int(x), int(y));\n"
+            "uvec4 l = uvec4(greaterThan(texelFetch(lowBits, coord, 0), vec4(0.5)));\n"
+            "uvec4 h = uvec4(greaterThan(texelFetch(highBits, coord, 0), vec4(0.5)));\n"
+            "return uvec4(l.x | (l.y << 1u) | (l.z << 2u) | (l.w << 3u) | (h.x << 4u) |\n"
+            "             (h.y << 5u) | (h.z << 6u) | (h.w << 7u), 0u, 0u, 0u);\n";
+    } else {
+        samplers = "uniform highp " + prefix + SamplerType(target) + " src;\n";
+        std::string fetch = target == GL_TEXTURE_2D
+                                ? "texelFetch(src, origin.xy + ivec2(int(x), int(y)), 0)"
+                                : "texelFetch(src, origin + ivec3(int(x), int(y), int(z)), 0)";
+        texelWords = value + " v = " + fetch + ";\n" + pack;
+    }
 
     return "#version 300 es\n"
            "precision highp float;\n"
-           "precision highp int;\n"
-           "uniform highp " +
-           sampler +
-           " src;\n"
+           "precision highp int;\n" +
+           samplers +
            "uniform ivec3 origin;\n"
            "uniform uvec3 copySize;\n"
            "flat out uint word;\n" +
            std::string(kEncoders) +
            "uvec4 TexelWords(uint x, uint y, uint z) {\n" +
-           value + " v = " + fetch + ";\n" + pack +
+           texelWords +
            "}\n"
            "void main() {\n"
            "    const uint kBytesPerTexel = " +
@@ -328,9 +356,24 @@ std::string VertexShader(Packing packing, uint32_t bytesPerTexel, GLenum target)
 }
 
 // GLSL ES 3.00 programs need a fragment shader even when rasterization is discarded.
-constexpr const char* kFragmentShader =
+constexpr const char* kEmptyFragmentShader =
     "#version 300 es\n"
     "void main() {}\n";
+
+// A triangle covering the viewport, drawn with no vertex attributes, that outputs 1.0.
+constexpr const char* kFullscreenVertexShader =
+    "#version 300 es\n"
+    "void main() {\n"
+    "    gl_Position = vec4(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0, 0.0, "
+    "1.0);\n"
+    "}\n";
+constexpr const char* kOnesFragmentShader =
+    "#version 300 es\n"
+    "precision mediump float;\n"
+    "out vec4 color;\n"
+    "void main() {\n"
+    "    color = vec4(1.0);\n"
+    "}\n";
 
 ResultOrError<GLuint> CompileShader(const OpenGLFunctions& gl,
                                     GLenum type,
@@ -353,28 +396,22 @@ ResultOrError<GLuint> CompileShader(const OpenGLFunctions& gl,
     return shader;
 }
 
-ResultOrError<GLuint> GetProgram(const OpenGLFunctions& gl,
-                                 TextureToBufferTFCache& cache,
-                                 const Layout& layout,
-                                 GLenum target) {
-    uint32_t key = (static_cast<uint32_t>(layout.packing) << 16) | (layout.bytesPerTexel << 8) |
-                   (target == GL_TEXTURE_2D ? 0 : target == GL_TEXTURE_2D_ARRAY ? 1 : 2);
-    if (auto it = cache.programs.find(key); it != cache.programs.end()) {
-        return it->second;
-    }
-
+// Links a program, which writes |varying| with transform feedback unless it is null.
+ResultOrError<GLuint> LinkProgram(const OpenGLFunctions& gl,
+                                  const std::string& vertexSource,
+                                  const std::string& fragmentSource,
+                                  const char* varying) {
     GLuint vertexShader;
-    DAWN_TRY_ASSIGN(vertexShader,
-                    CompileShader(gl, GL_VERTEX_SHADER,
-                                  VertexShader(layout.packing, layout.bytesPerTexel, target)));
+    DAWN_TRY_ASSIGN(vertexShader, CompileShader(gl, GL_VERTEX_SHADER, vertexSource));
     GLuint fragmentShader;
-    DAWN_TRY_ASSIGN(fragmentShader, CompileShader(gl, GL_FRAGMENT_SHADER, kFragmentShader));
+    DAWN_TRY_ASSIGN(fragmentShader, CompileShader(gl, GL_FRAGMENT_SHADER, fragmentSource));
 
     GLuint program = DAWN_GL_TRY(gl, CreateProgram());
     DAWN_GL_TRY(gl, AttachShader(program, vertexShader));
     DAWN_GL_TRY(gl, AttachShader(program, fragmentShader));
-    const char* varying = "word";
-    DAWN_GL_TRY(gl, TransformFeedbackVaryings(program, 1, &varying, GL_INTERLEAVED_ATTRIBS));
+    if (varying != nullptr) {
+        DAWN_GL_TRY(gl, TransformFeedbackVaryings(program, 1, &varying, GL_INTERLEAVED_ATTRIBS));
+    }
     DAWN_GL_TRY(gl, LinkProgram(program));
     DAWN_GL_TRY(gl, DeleteShader(vertexShader));
     DAWN_GL_TRY(gl, DeleteShader(fragmentShader));
@@ -386,67 +423,52 @@ ResultOrError<GLuint> GetProgram(const OpenGLFunctions& gl,
         std::vector<char> log(std::max(length, 1));
         DAWN_GL_TRY(gl, GetProgramInfoLog(program, length, nullptr, log.data()));
         DAWN_GL_TRY(gl, DeleteProgram(program));
-        return DAWN_UNRECOVERABLE_ERROR("Linking the program for a texture-to-buffer copy failed:\n%s",
-                                   log.data());
+        return DAWN_UNRECOVERABLE_ERROR(
+            "Linking the program for a texture-to-buffer copy failed:\n%s", log.data());
     }
+    return program;
+}
+
+ResultOrError<GLuint> GetProgram(const OpenGLFunctions& gl,
+                                 TextureToBufferTFCache& cache,
+                                 const Layout& layout,
+                                 GLenum target) {
+    uint32_t key = (static_cast<uint32_t>(layout.packing) << 16) | (layout.bytesPerTexel << 8) |
+                   (target == GL_TEXTURE_2D ? 0 : target == GL_TEXTURE_2D_ARRAY ? 1 : 2);
+    if (auto it = cache.programs.find(key); it != cache.programs.end()) {
+        return it->second;
+    }
+    GLuint program;
+    DAWN_TRY_ASSIGN(program,
+                    LinkProgram(gl, VertexShader(layout.packing, layout.bytesPerTexel, target),
+                                kEmptyFragmentShader, "word"));
     cache.programs.emplace(key, program);
     return program;
 }
 
-}  // namespace
-
-bool UsesTransformFeedbackForTextureToBufferCopy(const Texture* texture, Aspect aspect) {
 #if defined(__EMSCRIPTEN__)
-    return GetLayout(texture->GetFormat().format, aspect).has_value() &&
-           SamplerType(texture->GetGLTarget()) != nullptr;
-#else
-    return false;
-#endif
-}
-
-MaybeError CopyTextureToBufferWithTransformFeedback(const OpenGLFunctions& gl,
-                                                    Device* device,
-                                                    const TextureCopy& source,
-                                                    const BufferCopy& destination,
-                                                    const Extent3D& copySize) {
-#if !defined(__EMSCRIPTEN__)
-    DAWN_UNREACHABLE();
-#else
-    Texture* texture = ToBackend(source.texture.Get());
-    Buffer* buffer = ToBackend(destination.buffer.Get());
-    Layout layout = *GetLayout(texture->GetFormat().format, source.aspect);
-    GLenum target = texture->GetGLTarget();
-    TextureToBufferTFCache& cache = device->GetTextureToBufferTFCache();
-
-    GLuint program;
-    DAWN_TRY_ASSIGN(program, GetProgram(gl, cache, layout, target));
-    if (cache.sampler == 0) {
-        // Integer textures are incomplete with linear filtering, even for texelFetch().
-        DAWN_GL_TRY(gl, GenSamplers(1, &cache.sampler));
-        DAWN_GL_TRY(gl, SamplerParameteri(cache.sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
-        DAWN_GL_TRY(gl, SamplerParameteri(cache.sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
-        // A vertex array with no attributes, so that no vertex buffer limits the vertex count.
-        DAWN_GL_TRY(gl, GenVertexArrays(1, &cache.vertexArray));
-    }
-
+// Packs the |copySize| texels from |origin| of the texture(s) bound for |program|, which also
+// sets the program's other uniforms, and copies them to |buffer| at |offset| with the given row
+// and image strides.
+MaybeError CopyWithTransformFeedback(const OpenGLFunctions& gl,
+                                     TextureToBufferTFCache& cache,
+                                     GLuint program,
+                                     uint32_t bytesPerTexel,
+                                     const Origin3D& origin,
+                                     const Extent3D& copySize,
+                                     Buffer* buffer,
+                                     uint64_t offset,
+                                     uint64_t bytesPerRow,
+                                     uint64_t bytesPerImage) {
     // The copied bytes without row or image padding, rounded up to whole words.
-    const uint64_t rowBytes = uint64_t(copySize.width) * layout.bytesPerTexel;
+    const uint64_t rowBytes = uint64_t(copySize.width) * bytesPerTexel;
     const uint64_t copyBytes = rowBytes * copySize.height * copySize.depthOrArrayLayers;
     const GLsizei wordCount = checked_cast<GLsizei>((copyBytes + 3) / 4);
 
     DAWN_GL_TRY(gl, UseProgram(program));
-    DAWN_GL_TRY(gl, ActiveTexture(GL_TEXTURE0));
-    DAWN_GL_TRY(gl, BindTexture(target, texture->GetTextureHandle()));
-    // texelFetch() levels count from the base level. Binding a view sets both levels again.
-    DAWN_GL_TRY(gl, TexParameteri(target, GL_TEXTURE_BASE_LEVEL, source.mipLevel));
-    DAWN_GL_TRY(gl, TexParameteri(target, GL_TEXTURE_MAX_LEVEL, source.mipLevel));
-    DAWN_GL_TRY(gl, BindSampler(0, cache.sampler));
-    GLint location = DAWN_GL_TRY(gl, GetUniformLocation(program, "src"));
-    DAWN_GL_TRY(gl, Uniform1i(location, 0));
-    location = DAWN_GL_TRY(gl, GetUniformLocation(program, "origin"));
-    DAWN_GL_TRY(gl, Uniform3i(location, dchecked_cast<GLint>(source.origin.x),
-                              dchecked_cast<GLint>(source.origin.y),
-                              dchecked_cast<GLint>(source.origin.z)));
+    GLint location = DAWN_GL_TRY(gl, GetUniformLocation(program, "origin"));
+    DAWN_GL_TRY(gl, Uniform3i(location, dchecked_cast<GLint>(origin.x),
+                              dchecked_cast<GLint>(origin.y), dchecked_cast<GLint>(origin.z)));
     location = DAWN_GL_TRY(gl, GetUniformLocation(program, "copySize"));
     DAWN_GL_TRY(gl, Uniform3ui(location, copySize.width, copySize.height,
                                copySize.depthOrArrayLayers));
@@ -467,18 +489,13 @@ MaybeError CopyTextureToBufferWithTransformFeedback(const OpenGLFunctions& gl,
     DAWN_GL_TRY(gl, BindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 0));
     DAWN_GL_TRY(gl, BindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0));
     DAWN_GL_TRY(gl, BindVertexArray(0));
-    DAWN_GL_TRY(gl, BindSampler(0, 0));
 
     // Copy each row to its place, leaving the padding between rows and images as it was.
-    const TypedTexelBlockInfo& blockInfo = GetBlockInfo(source);
-    const uint64_t bytesPerRow = blockInfo.ToBytes(destination.blocksPerRow);
-    const uint64_t bytesPerImage =
-        blockInfo.ToBytes(destination.blocksPerRow * destination.rowsPerImage);
     auto ForEachRow = [&](auto copyRow) -> MaybeError {
         for (uint32_t z = 0; z < copySize.depthOrArrayLayers; z++) {
             for (uint32_t y = 0; y < copySize.height; y++) {
                 DAWN_TRY(copyRow((uint64_t(z) * copySize.height + y) * rowBytes,
-                                 destination.offset + z * bytesPerImage + y * bytesPerRow));
+                                 offset + z * bytesPerImage + y * bytesPerRow));
             }
         }
         return {};
@@ -511,6 +528,173 @@ MaybeError CopyTextureToBufferWithTransformFeedback(const OpenGLFunctions& gl,
         DAWN_GL_TRY(gl, BindBuffer(GL_COPY_WRITE_BUFFER, 0));
     }
     DAWN_GL_TRY(gl, DeleteBuffers(1, &staging));
+    return {};
+}
+
+// WebGL 2 shaders can't read stencil values. Draws bit k of the stencil values of |layer| of
+// |mipLevel| of |texture| into channel k % 4 of planes[k / 4], two new RGBA8 textures the size
+// of the level: a stencil test on bit k lets a draw write 1.0 where the bit is set.
+MaybeError DrawStencilBitPlanes(const OpenGLFunctions& gl,
+                                TextureToBufferTFCache& cache,
+                                Texture* texture,
+                                uint32_t mipLevel,
+                                uint32_t layer,
+                                GLuint planes[2]) {
+    if (cache.stencilBitsProgram == 0) {
+        DAWN_TRY_ASSIGN(cache.stencilBitsProgram, LinkProgram(gl, kFullscreenVertexShader,
+                                                              kOnesFragmentShader, nullptr));
+    }
+    const Extent3D size = texture->GetMipLevelSingleSubresourcePhysicalSize(mipLevel,
+                                                                           Aspect::Stencil);
+    const GLsizei width = dchecked_cast<GLsizei>(size.width);
+    const GLsizei height = dchecked_cast<GLsizei>(size.height);
+
+    DAWN_GL_TRY(gl, GenTextures(2, planes));
+    for (uint32_t i = 0; i < 2; i++) {
+        DAWN_GL_TRY(gl, BindTexture(GL_TEXTURE_2D, planes[i]));
+        DAWN_GL_TRY(gl, TexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, width, height));
+    }
+
+    GLuint framebuffer = 0;
+    DAWN_GL_TRY(gl, GenFramebuffers(1, &framebuffer));
+    DAWN_GL_TRY(gl, BindFramebuffer(GL_FRAMEBUFFER, framebuffer));
+    const GLenum attachment = texture->GetGLFormat().internalFormat == GL_STENCIL_INDEX8
+                                  ? GL_STENCIL_ATTACHMENT
+                                  : GL_DEPTH_STENCIL_ATTACHMENT;
+    if (texture->GetGLTarget() == GL_TEXTURE_2D) {
+        DAWN_GL_TRY(gl, FramebufferTexture2D(GL_FRAMEBUFFER, attachment, GL_TEXTURE_2D,
+                                             texture->GetTextureHandle(), mipLevel));
+    } else {
+        DAWN_GL_TRY(gl, FramebufferTextureLayer(GL_FRAMEBUFFER, attachment,
+                                                texture->GetTextureHandle(), mipLevel, layer));
+    }
+
+    DAWN_GL_TRY(gl, UseProgram(cache.stencilBitsProgram));
+    DAWN_GL_TRY(gl, BindVertexArray(cache.vertexArray));
+    DAWN_GL_TRY(gl, Viewport(0, 0, width, height));
+    DAWN_GL_TRY(gl, Disable(GL_SCISSOR_TEST));
+    DAWN_GL_TRY(gl, Disable(GL_BLEND));
+    DAWN_GL_TRY(gl, Disable(GL_CULL_FACE));
+    DAWN_GL_TRY(gl, Disable(GL_DEPTH_TEST));
+    DAWN_GL_TRY(gl, Disable(GL_SAMPLE_ALPHA_TO_COVERAGE));
+    DAWN_GL_TRY(gl, Enable(GL_STENCIL_TEST));
+    DAWN_GL_TRY(gl, StencilOp(GL_KEEP, GL_KEEP, GL_KEEP));
+    DAWN_GL_TRY(gl, StencilMask(0));
+    for (uint32_t i = 0; i < 2; i++) {
+        DAWN_GL_TRY(gl, FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                             planes[i], 0));
+        DAWN_TRY(CheckFramebufferComplete(gl, GL_FRAMEBUFFER));
+        static constexpr std::array<GLfloat, 4> kZero = {0, 0, 0, 0};
+        DAWN_GL_TRY(gl, ColorMask(true, true, true, true));
+        DAWN_GL_TRY(gl, ClearBufferfv(GL_COLOR, 0, kZero.data()));
+        for (uint32_t channel = 0; channel < 4; channel++) {
+            const GLuint bit = 1u << (i * 4 + channel);
+            DAWN_GL_TRY(gl, ColorMask(channel == 0, channel == 1, channel == 2, channel == 3));
+            DAWN_GL_TRY(gl, StencilFunc(GL_EQUAL, bit, bit));
+            DAWN_GL_TRY(gl, DrawArrays(GL_TRIANGLES, 0, 3));
+        }
+    }
+
+    // Draws set the rest again: pipelines their state and render passes the stencil function.
+    DAWN_GL_TRY(gl, ColorMask(true, true, true, true));
+    DAWN_GL_TRY(gl, Disable(GL_STENCIL_TEST));
+    DAWN_GL_TRY(gl, Enable(GL_SCISSOR_TEST));
+    DAWN_GL_TRY(gl, BindVertexArray(0));
+    DAWN_GL_TRY(gl, BindFramebuffer(GL_FRAMEBUFFER, 0));
+    DAWN_GL_TRY(gl, DeleteFramebuffers(1, &framebuffer));
+    return {};
+}
+#endif  // defined(__EMSCRIPTEN__)
+
+}  // namespace
+
+bool UsesTransformFeedbackForTextureToBufferCopy(const Texture* texture, Aspect aspect) {
+#if defined(__EMSCRIPTEN__)
+    return GetLayout(texture->GetFormat().format, aspect).has_value() &&
+           SamplerType(texture->GetGLTarget()) != nullptr;
+#else
+    return false;
+#endif
+}
+
+MaybeError CopyTextureToBufferWithTransformFeedback(const OpenGLFunctions& gl,
+                                                    Device* device,
+                                                    const TextureCopy& source,
+                                                    const BufferCopy& destination,
+                                                    const Extent3D& copySize) {
+#if !defined(__EMSCRIPTEN__)
+    DAWN_UNREACHABLE();
+#else
+    Texture* texture = ToBackend(source.texture.Get());
+    Buffer* buffer = ToBackend(destination.buffer.Get());
+    Layout layout = *GetLayout(texture->GetFormat().format, source.aspect);
+    GLenum target = texture->GetGLTarget();
+    TextureToBufferTFCache& cache = device->GetTextureToBufferTFCache();
+
+    // Stencil programs read the bit planes, which are 2D textures.
+    GLuint program;
+    DAWN_TRY_ASSIGN(program, GetProgram(gl, cache, layout,
+                                        layout.packing == Packing::Stencil8 ? GL_TEXTURE_2D
+                                                                            : target));
+    if (cache.sampler == 0) {
+        // Integer textures are incomplete with linear filtering, even for texelFetch().
+        DAWN_GL_TRY(gl, GenSamplers(1, &cache.sampler));
+        DAWN_GL_TRY(gl, SamplerParameteri(cache.sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+        DAWN_GL_TRY(gl, SamplerParameteri(cache.sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+        // A vertex array with no attributes, so that no vertex buffer limits the vertex count.
+        DAWN_GL_TRY(gl, GenVertexArrays(1, &cache.vertexArray));
+    }
+
+    const TypedTexelBlockInfo& blockInfo = GetBlockInfo(source);
+    const uint64_t bytesPerRow = blockInfo.ToBytes(destination.blocksPerRow);
+    const uint64_t bytesPerImage =
+        blockInfo.ToBytes(destination.blocksPerRow * destination.rowsPerImage);
+    const Origin3D origin = {dchecked_cast<uint32_t>(source.origin.x),
+                             dchecked_cast<uint32_t>(source.origin.y),
+                             dchecked_cast<uint32_t>(source.origin.z)};
+
+    if (layout.packing != Packing::Stencil8) {
+        DAWN_GL_TRY(gl, UseProgram(program));
+        DAWN_GL_TRY(gl, ActiveTexture(GL_TEXTURE0));
+        DAWN_GL_TRY(gl, BindTexture(target, texture->GetTextureHandle()));
+        // texelFetch() levels count from the base level. Binding a view sets both levels again.
+        DAWN_GL_TRY(gl, TexParameteri(target, GL_TEXTURE_BASE_LEVEL, source.mipLevel));
+        DAWN_GL_TRY(gl, TexParameteri(target, GL_TEXTURE_MAX_LEVEL, source.mipLevel));
+        DAWN_GL_TRY(gl, BindSampler(0, cache.sampler));
+        GLint location = DAWN_GL_TRY(gl, GetUniformLocation(program, "src"));
+        DAWN_GL_TRY(gl, Uniform1i(location, 0));
+        DAWN_TRY(CopyWithTransformFeedback(gl, cache, program, layout.bytesPerTexel, origin,
+                                           copySize, buffer, destination.offset, bytesPerRow,
+                                           bytesPerImage));
+        DAWN_GL_TRY(gl, BindSampler(0, 0));
+        return {};
+    }
+
+    // Stencil: one layer at a time, through bit planes.
+    for (uint32_t layer = 0; layer < copySize.depthOrArrayLayers; layer++) {
+        GLuint planes[2];
+        DAWN_TRY(DrawStencilBitPlanes(gl, cache, texture, source.mipLevel, origin.z + layer,
+                                      planes));
+        DAWN_GL_TRY(gl, UseProgram(program));
+        for (uint32_t i = 0; i < 2; i++) {
+            DAWN_GL_TRY(gl, ActiveTexture(GL_TEXTURE0 + i));
+            DAWN_GL_TRY(gl, BindTexture(GL_TEXTURE_2D, planes[i]));
+            DAWN_GL_TRY(gl, BindSampler(i, cache.sampler));
+        }
+        GLint location = DAWN_GL_TRY(gl, GetUniformLocation(program, "lowBits"));
+        DAWN_GL_TRY(gl, Uniform1i(location, 0));
+        location = DAWN_GL_TRY(gl, GetUniformLocation(program, "highBits"));
+        DAWN_GL_TRY(gl, Uniform1i(location, 1));
+        DAWN_TRY(CopyWithTransformFeedback(
+            gl, cache, program, 1, {origin.x, origin.y, 0},
+            {copySize.width, copySize.height, 1}, buffer,
+            destination.offset + layer * bytesPerImage, bytesPerRow, bytesPerImage));
+        for (uint32_t i = 0; i < 2; i++) {
+            DAWN_GL_TRY(gl, BindSampler(i, 0));
+        }
+        DAWN_GL_TRY(gl, ActiveTexture(GL_TEXTURE0));
+        DAWN_GL_TRY(gl, DeleteTextures(2, planes));
+    }
     return {};
 #endif  // !defined(__EMSCRIPTEN__)
 }

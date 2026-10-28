@@ -56,6 +56,7 @@ MaybeError CopyTextureToBufferWithTransformFeedback(const OpenGLFunctions& gl,
 // The GL objects the copies use, kept for the lifetime of the device's context.
 struct TextureToBufferTFCache {
     absl::flat_hash_map<uint32_t, GLuint> programs;
+    GLuint stencilBitsProgram = 0;
     GLuint sampler = 0;
     GLuint vertexArray = 0;
 };
