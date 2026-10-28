@@ -907,6 +907,8 @@ source_set("sources") {
       "opengl/SwapChainEGL.h",
       "opengl/TextureGL.cpp",
       "opengl/TextureGL.h",
+      "opengl/TextureToBufferTF.cpp",
+      "opengl/TextureToBufferTF.h",
       "opengl/UtilsEGL.cpp",
       "opengl/UtilsEGL.h",
       "opengl/UtilsGL.cpp",

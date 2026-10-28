@@ -44,6 +44,7 @@
 #include "src/dawn/native/opengl/Forward.h"
 #include "src/dawn/native/opengl/GLFormat.h"
 #include "src/dawn/native/opengl/OpenGLFunctions.h"
+#include "src/dawn/native/opengl/TextureToBufferTF.h"
 #include "src/utils/compiler.h"
 #include "src/utils/platform.h"
 
@@ -244,6 +245,10 @@ class Device final : public DeviceBase {
 
     const Buffer* GetInternalTextureBuiltinsUniformBuffer() const;
 
+#if defined(__EMSCRIPTEN__)
+    TextureToBufferTFCache& GetTextureToBufferTFCache();
+#endif
+
   private:
     Device(AdapterBase* adapter,
            const UnpackedPtr<DeviceDescriptor>& descriptor,
@@ -313,6 +318,11 @@ class Device final : public DeviceBase {
 #if DAWN_PLATFORM_IS(ANDROID)
     std::unique_ptr<AHBFunctions> mAHBFunctions;
 #endif  // DAWN_PLATFORM_IS(ANDROID)
+
+#if defined(__EMSCRIPTEN__)
+    // GL objects for the texture-to-buffer copies with transform feedback.
+    TextureToBufferTFCache mTextureToBufferTFCache;
+#endif
 };
 
 }  // namespace dawn::native::opengl

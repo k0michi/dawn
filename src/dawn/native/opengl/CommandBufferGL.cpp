@@ -55,6 +55,7 @@
 #include "src/dawn/native/opengl/RenderPipelineGL.h"
 #include "src/dawn/native/opengl/SamplerGL.h"
 #include "src/dawn/native/opengl/TextureGL.h"
+#include "src/dawn/native/opengl/TextureToBufferTF.h"
 #include "src/dawn/native/opengl/UtilsGL.h"
 #include "src/utils/compiler.h"
 #include "src/utils/numeric.h"
@@ -971,6 +972,15 @@ MaybeError CommandBuffer::RecordCommands(const OpenGLFunctions& gl) {
                 SubresourceRange subresources =
                     GetSubresourcesAffectedByCopy(src, copy->copySize.ToExtent3D());
                 DAWN_TRY(texture->EnsureSubresourceContentInitialized(gl, subresources));
+#if defined(__EMSCRIPTEN__)
+                // WebGL 2 has no compute shaders for the blits that copy what glReadPixels
+                // can't read.
+                if (UsesTransformFeedbackForTextureToBufferCopy(texture, src.aspect)) {
+                    DAWN_TRY(CopyTextureToBufferWithTransformFeedback(
+                        gl, ToBackend(GetDevice()), src, dst, copySize.ToExtent3D()));
+                    break;
+                }
+#endif
                 // The only way to move data from a texture to a buffer in GL is via
                 // glReadPixels with a pack buffer. Create a temporary FBO for the copy.
                 DAWN_GL_TRY(gl, BindTexture(target, texture->GetTextureHandle()));

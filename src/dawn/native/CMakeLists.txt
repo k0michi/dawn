@@ -729,6 +729,7 @@ if (DAWN_ENABLE_OPENGL)
         "opengl/SharedTextureMemoryGL.h"
         "opengl/SwapChainEGL.h"
         "opengl/TextureGL.h"
+        "opengl/TextureToBufferTF.h"
         "opengl/UtilsEGL.h"
         "opengl/UtilsGL.h"
     )
@@ -763,6 +764,7 @@ if (DAWN_ENABLE_OPENGL)
         "opengl/SharedTextureMemoryGL.cpp"
         "opengl/SwapChainEGL.cpp"
         "opengl/TextureGL.cpp"
+        "opengl/TextureToBufferTF.cpp"
         "opengl/UtilsEGL.cpp"
         "opengl/UtilsGL.cpp"
     )

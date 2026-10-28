@@ -588,6 +588,12 @@ ContextEGL* Device::GetContext() const {
     return mContext.get();
 }
 
+#if defined(__EMSCRIPTEN__)
+TextureToBufferTFCache& Device::GetTextureToBufferTFCache() {
+    return mTextureToBufferTFCache;
+}
+#endif
+
 const Buffer* Device::GetInternalTextureBuiltinsUniformBuffer() const {
     return mTextureBuiltinsBuffer.Get();
 }
