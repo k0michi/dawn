@@ -76,6 +76,7 @@ jobs:
           .github/webgl2/link.sh msaa-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/msaa-test"
           .github/webgl2/link.sh compression-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/compression-test"
           .github/webgl2/link.sh view-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/view-test"
+          .github/webgl2/link.sh index-test "$RUNNER_TEMP/build" "$RUNNER_TEMP/index-test"
 
       - name: Install Playwright
         shell: bash
@@ -133,6 +134,11 @@ jobs:
         env:
           HIDE_WEBGL_EXTENSIONS: WEBGL_stencil_texturing
         run: node .github/webgl2/run-tests.mjs "$RUNNER_TEMP/view-test"
+
+      - name: Index tests
+        if: success() || failure()
+        shell: bash
+        run: node .github/webgl2/run-tests.mjs "$RUNNER_TEMP/index-test"
 
       - name: Surface tests
         if: success() || failure()
