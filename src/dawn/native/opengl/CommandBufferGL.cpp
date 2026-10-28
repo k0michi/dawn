@@ -59,6 +59,11 @@
 #include "src/utils/compiler.h"
 #include "src/utils/numeric.h"
 
+#if defined(__EMSCRIPTEN__)
+// Emscripten's WebGL 2 getBufferSubData, which its GetProcAddress doesn't return.
+extern "C" void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void* data);
+#endif
+
 namespace dawn::native::opengl {
 
 namespace {
@@ -1789,6 +1794,91 @@ MaybeError CommandBuffer::RecordRenderPass(BeginRenderPassCmd* renderPass,
     DAWN_UNREACHABLE();
 }
 
+#if defined(__EMSCRIPTEN__)
+namespace {
+
+// WebGL 2 has no BGRA formats, so BGRA8Unorm textures are RGBA8 (see GLFormat.cpp), and GL_BGRA
+// data can't be uploaded. Uploads |data|, which is in a bound GL_PIXEL_UNPACK_BUFFER if there is
+// one, with red and blue swapped, as RGBA.
+MaybeError TexSubImageBGRAAsRGBA(const OpenGLFunctions& gl,
+                                 const TextureCopy& destination,
+                                 const void* data,
+                                 const TexelCopyBufferLayout& dataLayout,
+                                 const TexelExtent3D& copySize) {
+    Texture* texture = ToBackend(destination.texture.Get());
+    GLenum target = texture->GetGLTarget();
+    const uint32_t width = dchecked_cast<uint32_t>(copySize.width);
+    const uint32_t height = dchecked_cast<uint32_t>(copySize.height);
+    const uint32_t depth = dchecked_cast<uint32_t>(copySize.depthOrArrayLayers);
+    if (width == 0 || height == 0 || depth == 0) {
+        return {};
+    }
+    const uint64_t rowBytes = uint64_t(width) * 4;
+    const uint64_t bytesPerRow = dataLayout.bytesPerRow;
+    const uint64_t bytesPerImage = uint64_t(dataLayout.rowsPerImage) * bytesPerRow;
+    const uint64_t offset = reinterpret_cast<uintptr_t>(data) + dataLayout.offset;
+
+    GLint unpackBuffer = 0;
+    DAWN_GL_TRY(gl, GetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer));
+    std::vector<uint8_t> bgra;
+    const uint8_t* source;
+    if (unpackBuffer != 0) {
+        bgra.resize((depth - 1) * bytesPerImage + (height - 1) * bytesPerRow + rowBytes);
+        glGetBufferSubData(GL_PIXEL_UNPACK_BUFFER, checked_cast<GLintptr>(offset),
+                           checked_cast<GLsizeiptr>(bgra.size()), bgra.data());
+        DAWN_GL_TRY(gl, BindBuffer(GL_PIXEL_UNPACK_BUFFER, 0));
+        source = bgra.data();
+    } else {
+        source = reinterpret_cast<const uint8_t*>(offset);
+    }
+
+    std::vector<uint8_t> rgba(rowBytes * height * depth);
+    uint8_t* to = rgba.data();
+    for (uint32_t z = 0; z < depth; z++) {
+        for (uint32_t y = 0; y < height; y++) {
+            const uint8_t* from = DAWN_UNSAFE_TODO(source + z * bytesPerImage + y * bytesPerRow);
+            for (uint32_t x = 0; x < width; x++) {
+                DAWN_UNSAFE_TODO({
+                    to[0] = from[2];
+                    to[1] = from[1];
+                    to[2] = from[0];
+                    to[3] = from[3];
+                    to += 4;
+                    from += 4;
+                });
+            }
+        }
+    }
+
+    const GLint x = dchecked_cast<GLint>(destination.origin.x);
+    const GLint y = dchecked_cast<GLint>(destination.origin.y);
+    const GLint z = dchecked_cast<GLint>(destination.origin.z);
+    DAWN_GL_TRY(gl, ActiveTexture(GL_TEXTURE0));
+    DAWN_GL_TRY(gl, BindTexture(target, texture->GetTextureHandle()));
+    if (target == GL_TEXTURE_2D) {
+        DAWN_GL_TRY(gl, TexSubImage2D(target, destination.mipLevel, x, y, width, height, GL_RGBA,
+                                      GL_UNSIGNED_BYTE, rgba.data()));
+    } else if (target == GL_TEXTURE_CUBE_MAP) {
+        for (uint32_t layer = 0; layer < depth; layer++) {
+            DAWN_GL_TRY(gl, TexSubImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + z + layer,
+                                          destination.mipLevel, x, y, width, height, GL_RGBA,
+                                          GL_UNSIGNED_BYTE,
+                                          DAWN_UNSAFE_TODO(rgba.data() + layer * rowBytes * height)));
+        }
+    } else {
+        DAWN_GL_TRY(gl, TexSubImage3D(target, destination.mipLevel, x, y, z, width, height, depth,
+                                      GL_RGBA, GL_UNSIGNED_BYTE, rgba.data()));
+    }
+
+    if (unpackBuffer != 0) {
+        DAWN_GL_TRY(gl, BindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(unpackBuffer)));
+    }
+    return {};
+}
+
+}  // namespace
+#endif  // defined(__EMSCRIPTEN__)
+
 MaybeError DoTexSubImage(const OpenGLFunctions& gl,
                          const TextureCopy& destination,
                          const void* data,
@@ -1798,6 +1888,11 @@ MaybeError DoTexSubImage(const OpenGLFunctions& gl,
 
     const GLFormat& format = texture->GetGLFormat();
     GLenum target = texture->GetGLTarget();
+#if defined(__EMSCRIPTEN__)
+    if (format.format == GL_BGRA) {
+        return TexSubImageBGRAAsRGBA(gl, destination, data, dataLayout, copySize);
+    }
+#endif
     data = DAWN_UNSAFE_TODO(static_cast<const uint8_t*>(data) + dataLayout.offset);
     DAWN_GL_TRY(gl, ActiveTexture(GL_TEXTURE0));
     DAWN_GL_TRY(gl, BindTexture(target, texture->GetTextureHandle()));
