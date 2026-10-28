@@ -28,6 +28,7 @@
 #include "src/dawn/native/opengl/PipelineGL.h"
 
 #include <algorithm>
+#include <charconv>
 #include <set>
 #include <sstream>
 #include <string>
@@ -49,6 +50,41 @@
 #include "src/utils/numeric.h"
 
 namespace dawn::native::opengl {
+
+namespace {
+
+// GLSL ES 3.00 has no binding qualifier, so Tint ends each uniform block's name in
+// "_ubo_binding<N>" instead. Binds each block of the program to its binding.
+MaybeError BindUniformBlocksByName(const OpenGLFunctions& gl, GLuint program) {
+    constexpr std::string_view kMarker = "_ubo_binding";
+
+    GLint blockCount = 0;
+    DAWN_GL_TRY(gl, GetProgramiv(program, GL_ACTIVE_UNIFORM_BLOCKS, &blockCount));
+    GLint maxNameLength = 0;
+    DAWN_GL_TRY(gl,
+                GetProgramiv(program, GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH, &maxNameLength));
+    std::vector<char> name(std::max(maxNameLength, 1));
+
+    for (GLint block = 0; block < blockCount; block++) {
+        GLsizei length = 0;
+        DAWN_GL_TRY(gl, GetActiveUniformBlockName(program, GLuint(block), GLsizei(name.size()),
+                                                  &length, name.data()));
+        std::string_view blockName(name.data(), size_t(length));
+        size_t marker = blockName.rfind(kMarker);
+        if (marker == std::string_view::npos) {
+            continue;
+        }
+        std::string_view digits = blockName.substr(marker + kMarker.size());
+        GLuint binding = 0;
+        auto [end, error] = std::from_chars(digits.data(), digits.data() + digits.size(), binding);
+        DAWN_INVALID_IF(error != std::errc() || end != digits.data() + digits.size(),
+                        "Uniform block %s has no binding.", blockName);
+        DAWN_GL_TRY(gl, UniformBlockBinding(program, GLuint(block), binding));
+    }
+    return {};
+}
+
+}  // anonymous namespace
 
 PipelineGL::PipelineGL() : mProgram(0) {}
 
@@ -179,6 +215,10 @@ MaybeError PipelineGL::InitializeBase(
             DAWN_GL_TRY(gl, GetProgramInfoLog(mProgram, infoLogLength, nullptr, &buffer[0]));
             return DAWN_PIPELINE_UNCATEGORIZED_ERROR("Program link failed:\n%s", buffer.data());
         }
+    }
+
+    if (gl.GetVersion().IsES() && !gl.IsAtLeastGLES(3, 1)) {
+        DAWN_TRY(BindUniformBlocksByName(gl, mProgram));
     }
 
     // Compute links between stages for combined samplers, then bind them to texture units
