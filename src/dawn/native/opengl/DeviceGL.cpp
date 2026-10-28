@@ -203,7 +203,10 @@ MaybeError Device::Initialize(const UnpackedPtr<DeviceDescriptor>& descriptor) {
         DAWN_GL_TRY(gl, Enable(GL_MULTISAMPLE));
         DAWN_GL_TRY(gl, Enable(GL_FRAMEBUFFER_SRGB));
     }
-    DAWN_GL_TRY(gl, Enable(GL_SAMPLE_MASK));
+    // The sample mask is ES 3.1. WebGL 2 has no way to set it.
+    if (gl.GetVersion().IsDesktop() || gl.IsAtLeastGLES(3, 1)) {
+        DAWN_GL_TRY(gl, Enable(GL_SAMPLE_MASK));
+    }
 
     Ref<Queue> queue;
     DAWN_TRY_ASSIGN(queue, Queue::Create(this, &descriptor->defaultQueue));

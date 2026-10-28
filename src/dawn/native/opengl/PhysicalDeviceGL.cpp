@@ -160,7 +160,13 @@ MaybeError PhysicalDevice::InitializeImpl() {
     // got a GL context that supports the required version. Check it now.
     switch (GetBackendType()) {
         case wgpu::BackendType::OpenGLES:
+#if defined(__EMSCRIPTEN__)
+            // WebGL 2 is OpenGL ES 3.0. What it lacks from ES 3.1 is left out of the
+            // limits and features below.
+            DAWN_INVALID_IF(!mFunctions.IsAtLeastGLES(3, 0), "WebGL 2 is required.");
+#else
             DAWN_INVALID_IF(!mFunctions.IsAtLeastGLES(3, 1), "OpenGL ES 3.1 is required.");
+#endif
             DAWN_INVALID_IF(!mFunctions.IsAtLeastGLES(3, 2) &&
                                 !mFunctions.IsGLExtensionSupported("GL_EXT_color_buffer_float"),
                             "GL_EXT_color_buffer_float is required for OpenGL ES 3.1.");
@@ -253,8 +259,12 @@ void PhysicalDevice::InitializeSupportedFeaturesImpl() {
     }
 
     // ETC2 is core in ES 3.0.
-    // However, ANGLE on Desktop GL does not support it.
+    // However, ANGLE on Desktop GL does not support it, and WebGL 2 needs an extension.
+#if defined(__EMSCRIPTEN__)
+    if (mFunctions.IsGLExtensionSupported("GL_WEBGL_compressed_texture_etc")) {
+#else
     if (mFunctions.IsAtLeastGLES(3, 0) && !IsANGLEDesktopGL(mName)) {
+#endif
         EnableFeature(Feature::TextureCompressionETC2);
     }
 
@@ -338,6 +348,22 @@ MaybeError PhysicalDevice::InitializeSupportedLimitsImpl(CombinedLimits* limits)
     const OpenGLFunctions& gl = mFunctions;
     GetDefaultLimitsForSupportedFeatureLevel(limits);
 
+    // Storage buffers, images and compute shaders are ES 3.1. Without them (WebGL 2), their
+    // limits are 0 and querying them would be an error.
+    const bool hasES31 = gl.GetVersion().IsDesktop() || gl.IsAtLeastGLES(3, 1);
+    auto Get31 = [&](GLenum pname) -> ResultOrError<GLint> {
+        if (!hasES31) {
+            return GLint(0);
+        }
+        return Get(gl, pname);
+    };
+    auto GetIndexed31 = [&](GLenum pname, GLuint index) -> ResultOrError<GLint> {
+        if (!hasES31) {
+            return GLint(0);
+        }
+        return GetIndexed(gl, pname, index);
+    };
+
     DAWN_TRY_ASSIGN(limits->v1.maxTextureDimension2D, Get(gl, GL_MAX_TEXTURE_SIZE));
     limits->v1.maxTextureDimension1D = limits->v1.maxTextureDimension2D;
     DAWN_TRY_ASSIGN(limits->v1.maxTextureDimension3D, Get(gl, GL_MAX_3D_TEXTURE_SIZE));
@@ -348,7 +374,7 @@ MaybeError PhysicalDevice::InitializeSupportedLimitsImpl(CombinedLimits* limits)
     DAWN_TRY_ASSIGN(limits->v1.maxDynamicUniformBuffersPerPipelineLayout,
                     Get(gl, GL_MAX_UNIFORM_BUFFER_BINDINGS));
     DAWN_TRY_ASSIGN(limits->v1.maxDynamicStorageBuffersPerPipelineLayout,
-                    Get(gl, GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS));
+                    Get31(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS));
 
     GLuint maxTextureImageUnits = 0, maxVertexTextureImageUnits = 0;
     DAWN_TRY_ASSIGN(maxTextureImageUnits, Get(gl, GL_MAX_TEXTURE_IMAGE_UNITS));
@@ -358,32 +384,37 @@ MaybeError PhysicalDevice::InitializeSupportedLimitsImpl(CombinedLimits* limits)
 
     DAWN_TRY_ASSIGN(limits->v1.maxSamplersPerShaderStage, Get(gl, GL_MAX_TEXTURE_IMAGE_UNITS));
     DAWN_TRY_ASSIGN(limits->v1.maxStorageBuffersPerShaderStage,
-                    Get(gl, GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS));
+                    Get31(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS));
     // TODO(crbug.com/dawn/1834): Note that OpenGLES allows an implementation to have zero vertex
     // image uniforms, so this isn't technically correct for vertex shaders.
     DAWN_TRY_ASSIGN(limits->v1.maxStorageTexturesPerShaderStage,
-                    Get(gl, GL_MAX_COMPUTE_IMAGE_UNIFORMS));
+                    Get31(GL_MAX_COMPUTE_IMAGE_UNIFORMS));
     DAWN_TRY_ASSIGN(limits->compat.maxStorageTexturesInFragmentStage,
-                    Get(gl, GL_MAX_FRAGMENT_IMAGE_UNIFORMS));
+                    Get31(GL_MAX_FRAGMENT_IMAGE_UNIFORMS));
 
     DAWN_TRY_ASSIGN(limits->compat.maxStorageBuffersInFragmentStage,
-                    Get(gl, GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS));
+                    Get31(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS));
     DAWN_TRY_ASSIGN(limits->compat.maxStorageTexturesInVertexStage,
-                    Get(gl, GL_MAX_VERTEX_IMAGE_UNIFORMS));
+                    Get31(GL_MAX_VERTEX_IMAGE_UNIFORMS));
     DAWN_TRY_ASSIGN(limits->compat.maxStorageBuffersInVertexStage,
-                    Get(gl, GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS));
+                    Get31(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS));
 
     DAWN_TRY_ASSIGN(limits->v1.maxUniformBuffersPerShaderStage,
                     Get(gl, GL_MAX_UNIFORM_BUFFER_BINDINGS));
     DAWN_TRY_ASSIGN(limits->v1.maxUniformBufferBindingSize, Get(gl, GL_MAX_UNIFORM_BLOCK_SIZE));
     DAWN_TRY_ASSIGN(limits->v1.maxStorageBufferBindingSize,
-                    Get(gl, GL_MAX_SHADER_STORAGE_BLOCK_SIZE));
+                    Get31(GL_MAX_SHADER_STORAGE_BLOCK_SIZE));
 
     DAWN_TRY_ASSIGN(limits->v1.minUniformBufferOffsetAlignment,
                     Get(gl, GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT));
     DAWN_TRY_ASSIGN(limits->v1.minStorageBufferOffsetAlignment,
-                    Get(gl, GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT));
-    DAWN_TRY_ASSIGN(limits->v1.maxVertexBuffers, Get(gl, GL_MAX_VERTEX_ATTRIB_BINDINGS));
+                    Get31(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT));
+    if (hasES31) {
+        DAWN_TRY_ASSIGN(limits->v1.maxVertexBuffers, Get(gl, GL_MAX_VERTEX_ATTRIB_BINDINGS));
+    } else {
+        // Each attribute has its own glVertexAttribPointer.
+        DAWN_TRY_ASSIGN(limits->v1.maxVertexBuffers, Get(gl, GL_MAX_VERTEX_ATTRIBS));
+    }
     limits->v1.maxBufferSize = kAssumedMaxBufferSize;
     // The code that handles adding the index buffer offset to first_index
     // used in drawIndexedIndirect can not handle a max buffer size larger than 4gig.
@@ -391,7 +422,13 @@ MaybeError PhysicalDevice::InitializeSupportedLimitsImpl(CombinedLimits* limits)
     static_assert(kAssumedMaxBufferSize < 0x100000000u);
 
     DAWN_TRY_ASSIGN(limits->v1.maxVertexAttributes, Get(gl, GL_MAX_VERTEX_ATTRIBS));
-    DAWN_TRY_ASSIGN(limits->v1.maxVertexBufferArrayStride, Get(gl, GL_MAX_VERTEX_ATTRIB_STRIDE));
+    if (hasES31) {
+        DAWN_TRY_ASSIGN(limits->v1.maxVertexBufferArrayStride,
+                        Get(gl, GL_MAX_VERTEX_ATTRIB_STRIDE));
+    } else {
+        // WebGL 2 caps vertexAttribPointer's stride at 255.
+        limits->v1.maxVertexBufferArrayStride = 255;
+    }
     DAWN_TRY_ASSIGN(limits->v1.maxInterStageShaderVariables, Get(gl, GL_MAX_VARYING_VECTORS));
     // TODO(dawn:685, dawn:1448): Support higher values as ANGLE compiler always generates
     // additional shader varyings (gl_PointSize and dx_Position) on ANGLE D3D backends.
@@ -408,19 +445,19 @@ MaybeError PhysicalDevice::InitializeSupportedLimitsImpl(CombinedLimits* limits)
     limits->v1.maxColorAttachmentBytesPerSample = 16 * maxColorAttachments;
 
     DAWN_TRY_ASSIGN(limits->v1.maxComputeWorkgroupStorageSize,
-                    Get(gl, GL_MAX_COMPUTE_SHARED_MEMORY_SIZE));
+                    Get31(GL_MAX_COMPUTE_SHARED_MEMORY_SIZE));
     DAWN_TRY_ASSIGN(limits->v1.maxComputeInvocationsPerWorkgroup,
-                    Get(gl, GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS));
+                    Get31(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS));
     DAWN_TRY_ASSIGN(limits->v1.maxComputeWorkgroupSizeX,
-                    GetIndexed(gl, GL_MAX_COMPUTE_WORK_GROUP_SIZE, 0));
+                    GetIndexed31(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 0));
     DAWN_TRY_ASSIGN(limits->v1.maxComputeWorkgroupSizeY,
-                    GetIndexed(gl, GL_MAX_COMPUTE_WORK_GROUP_SIZE, 1));
+                    GetIndexed31(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 1));
     DAWN_TRY_ASSIGN(limits->v1.maxComputeWorkgroupSizeZ,
-                    GetIndexed(gl, GL_MAX_COMPUTE_WORK_GROUP_SIZE, 2));
+                    GetIndexed31(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 2));
     GLint v[3];
-    DAWN_TRY_ASSIGN(v[0], GetIndexed(gl, GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0));
-    DAWN_TRY_ASSIGN(v[1], GetIndexed(gl, GL_MAX_COMPUTE_WORK_GROUP_COUNT, 1));
-    DAWN_TRY_ASSIGN(v[2], GetIndexed(gl, GL_MAX_COMPUTE_WORK_GROUP_COUNT, 2));
+    DAWN_TRY_ASSIGN(v[0], GetIndexed31(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0));
+    DAWN_TRY_ASSIGN(v[1], GetIndexed31(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 1));
+    DAWN_TRY_ASSIGN(v[2], GetIndexed31(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 2));
     limits->v1.maxComputeWorkgroupsPerDimension = std::min({v[0], v[1], v[2]});
     limits->v1.maxImmediateSize = kMaxImmediateDataBytes;
     return {};
@@ -613,6 +650,10 @@ void PhysicalDevice::PopulateBackendProperties(UnpackedPtr<AdapterInfo>& info,
 bool PhysicalDevice::SupportTextureComponentSwizzle() const {
     // Texture component swizzle requires GLES 3.0 / GL 3.3+ and is known to be incomplete or
     // unsupported on the ANGLE D3D11 backend (as D3D11 lacks native support).
+#if defined(__EMSCRIPTEN__)
+    // WebGL 2 has no TEXTURE_SWIZZLE_* parameters.
+    return false;
+#endif
     return (mFunctions.IsAtLeastGLES(3, 0) || mFunctions.IsAtLeastGL(3, 3));
 }
 

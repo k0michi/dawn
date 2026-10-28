@@ -1488,11 +1488,14 @@ MaybeError CommandBuffer::RecordRenderPass(BeginRenderPassCmd* renderPass,
                 DAWN_TRY(bindGroupTracker.Apply(gl, immediates));
 
                 const auto topology = lastPipeline->GetGLPrimitiveTopology();
+#if !defined(__EMSCRIPTEN__)
+                // WebGL 2 always restarts at the fixed index and has no enum to change it.
                 if (topology == GL_LINE_STRIP || topology == GL_TRIANGLE_STRIP) {
                     DAWN_GL_TRY(gl, Enable(GL_PRIMITIVE_RESTART_FIXED_INDEX));
                 } else {
                     DAWN_GL_TRY(gl, Disable(GL_PRIMITIVE_RESTART_FIXED_INDEX));
                 }
+#endif
 
                 immediates.SetFirstVertex(draw->baseVertex);
                 immediates.SetFirstInstance(draw->firstInstance);
@@ -1546,11 +1549,14 @@ MaybeError CommandBuffer::RecordRenderPass(BeginRenderPassCmd* renderPass,
                 DAWN_ASSERT(indirectBuffer != nullptr);
 
                 const auto topology = lastPipeline->GetGLPrimitiveTopology();
+#if !defined(__EMSCRIPTEN__)
+                // WebGL 2 always restarts at the fixed index and has no enum to change it.
                 if (topology == GL_LINE_STRIP || topology == GL_TRIANGLE_STRIP) {
                     DAWN_GL_TRY(gl, Enable(GL_PRIMITIVE_RESTART_FIXED_INDEX));
                 } else {
                     DAWN_GL_TRY(gl, Disable(GL_PRIMITIVE_RESTART_FIXED_INDEX));
                 }
+#endif
 
                 DAWN_GL_TRY(gl, BindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer->GetHandle()));
                 DAWN_GL_TRY(gl, DrawElementsIndirect(topology, indexBufferFormat,

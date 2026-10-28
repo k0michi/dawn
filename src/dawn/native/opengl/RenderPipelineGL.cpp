@@ -344,7 +344,9 @@ MaybeError RenderPipeline::ApplyNow(const OpenGLFunctions& gl,
 
     DAWN_TRY(ApplyDepthStencilState(gl, &persistentPipelineState));
 
-    DAWN_GL_TRY(gl, SampleMaski(0, GetSampleMask()));
+    if (gl.GetVersion().IsDesktop() || gl.IsAtLeastGLES(3, 1)) {
+        DAWN_GL_TRY(gl, SampleMaski(0, GetSampleMask()));
+    }
     if (IsAlphaToCoverageEnabled()) {
         DAWN_GL_TRY(gl, Enable(GL_SAMPLE_ALPHA_TO_COVERAGE));
     } else {
